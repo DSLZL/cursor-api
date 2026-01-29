@@ -144,11 +144,11 @@ impl ::prost::Message for SimpleRange {
     }
 }
 /// .aiserver.v1.LineRange
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, ::serde::Serialize, ::serde::Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, ::serde::Deserialize)]
 pub struct LineRange {
-    #[serde(skip_serializing_if = "::proto_value::is_default", default)]
+    #[serde(default)]
     pub start_line_number: i32,
-    #[serde(skip_serializing_if = "::proto_value::is_default", default)]
+    #[serde(default)]
     pub end_line_number_inclusive: i32,
 }
 impl ::prost::Message for LineRange {
@@ -1998,15 +1998,11 @@ impl ::prost::Message for StreamCppRequest {
 /// Nested message and enum types in [`StreamCppResponse`].
 pub mod stream_cpp_response {
     /// .aiserver.v1.StreamCppResponse.CursorPredictionTarget
-    #[derive(Debug, Default, Clone, PartialEq, Eq, Hash, ::serde::Serialize)]
+    #[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
     pub struct CursorPredictionTarget {
-        #[serde(rename = "relativePath", skip_serializing_if = "::proto_value::is_default")]
         pub relative_path: ::alloc::string::String,
-        #[serde(rename = "lineNumberOneIndexed", skip_serializing_if = "::proto_value::is_default")]
         pub line_number_one_indexed: i32,
-        #[serde(rename = "expectedContent", skip_serializing_if = "::proto_value::is_default")]
         pub expected_content: ::alloc::string::String,
-        #[serde(rename = "shouldRetriggerCpp", skip_serializing_if = "::proto_value::is_default")]
         pub should_retrigger_cpp: bool,
     }
     impl ::prost::Message for CursorPredictionTarget {
@@ -2041,11 +2037,9 @@ pub mod stream_cpp_response {
         }
     }
     /// .aiserver.v1.StreamCppResponse.ModelInfo
-    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, ::serde::Serialize)]
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct ModelInfo {
-        #[serde(rename = "isFusedCursorPredictionModel", skip_serializing_if = "::proto_value::is_default")]
         pub is_fused_cursor_prediction_model: bool,
-        #[serde(rename = "isMultidiffModel", skip_serializing_if = "::proto_value::is_default")]
         pub is_multidiff_model: bool,
     }
     impl ::prost::Message for ModelInfo {
@@ -2073,41 +2067,24 @@ pub mod stream_cpp_response {
     }
 }
 /// .aiserver.v1.StreamCppResponse
-#[derive(Debug, Default, Clone, PartialEq, Eq, Hash, ::serde::Serialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub struct StreamCppResponse {
-    #[serde(skip_serializing_if = "::proto_value::is_default")]
     pub text: ::alloc::string::String,
-    #[serde(rename = "suggestionStartLine", skip_serializing_if = "::core::option::Option::is_none")]
     pub suggestion_start_line: ::core::option::Option<i32>,
-    #[serde(rename = "suggestionConfidence", skip_serializing_if = "::core::option::Option::is_none")]
     pub suggestion_confidence: ::core::option::Option<i32>,
-    #[serde(rename = "doneStream", skip_serializing_if = "::core::option::Option::is_none")]
     pub done_stream: ::core::option::Option<bool>,
-    #[serde(rename = "debugModelOutput", skip_serializing_if = "::core::option::Option::is_none")]
     pub debug_model_output: ::core::option::Option<::alloc::string::String>,
-    #[serde(rename = "debugModelInput", skip_serializing_if = "::core::option::Option::is_none")]
     pub debug_model_input: ::core::option::Option<::alloc::string::String>,
-    #[serde(rename = "debugStreamTime", skip_serializing_if = "::core::option::Option::is_none")]
     pub debug_stream_time: ::core::option::Option<::alloc::string::String>,
-    #[serde(rename = "debugTotalTime", skip_serializing_if = "::core::option::Option::is_none")]
     pub debug_total_time: ::core::option::Option<::alloc::string::String>,
-    #[serde(rename = "debugTtftTime", skip_serializing_if = "::core::option::Option::is_none")]
     pub debug_ttft_time: ::core::option::Option<::alloc::string::String>,
-    #[serde(rename = "debugServerTiming", skip_serializing_if = "::core::option::Option::is_none")]
     pub debug_server_timing: ::core::option::Option<::alloc::string::String>,
-    #[serde(rename = "rangeToReplace", skip_serializing_if = "::core::option::Option::is_none")]
     pub range_to_replace: ::core::option::Option<LineRange>,
-    #[serde(rename = "cursorPredictionTarget", skip_serializing_if = "::core::option::Option::is_none")]
     pub cursor_prediction_target: ::core::option::Option<stream_cpp_response::CursorPredictionTarget>,
-    #[serde(rename = "doneEdit", skip_serializing_if = "::core::option::Option::is_none")]
     pub done_edit: ::core::option::Option<bool>,
-    #[serde(rename = "modelInfo", skip_serializing_if = "::core::option::Option::is_none")]
     pub model_info: ::core::option::Option<stream_cpp_response::ModelInfo>,
-    #[serde(rename = "beginEdit", skip_serializing_if = "::core::option::Option::is_none")]
     pub begin_edit: ::core::option::Option<bool>,
-    #[serde(rename = "shouldRemoveLeadingEol", skip_serializing_if = "::core::option::Option::is_none")]
     pub should_remove_leading_eol: ::core::option::Option<bool>,
-    #[serde(rename = "bindingId", skip_serializing_if = "::core::option::Option::is_none")]
     pub binding_id: ::core::option::Option<::byte_str::ByteStr>,
 }
 impl ::prost::Message for StreamCppResponse {
