@@ -1,4 +1,4 @@
-use std::fmt::{self, Debug};
+use std::fmt;
 use std::ops::RangeBounds;
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed};
 
@@ -30,15 +30,6 @@ impl<K, V> Node<K, V> {
     #[inline]
     pub(super) fn new_leaf_node() -> Self {
         Self::Leaf(LeafNode::new())
-    }
-
-    /// Clears the node.
-    #[inline]
-    pub(super) fn clear(&self, guard: &Guard) {
-        match &self {
-            Self::Internal(internal_node) => internal_node.clear(guard),
-            Self::Leaf(leaf_node) => leaf_node.clear(guard),
-        }
     }
 
     /// Returns the depth of the node.
@@ -100,7 +91,7 @@ where
         }
     }
 
-    /// Returns the maximum key entry in the entire tree.
+    /// Returns a [`RevIter`] pointing to the right-most leaf in the entire tree.
     #[inline]
     pub(super) fn max<'g>(&self, guard: &'g Guard) -> Option<RevIter<'g, K, V>> {
         match &self {
@@ -290,12 +281,16 @@ where
     }
 }
 
-impl<K, V> Debug for Node<K, V> {
+impl<K, V> fmt::Debug for Node<K, V>
+where
+    K: 'static + Clone + fmt::Debug + Ord,
+    V: 'static + fmt::Debug,
+{
     #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Internal(_) => f.debug_tuple("Internal").finish(),
-            Self::Leaf(_) => f.debug_tuple("Leaf").finish(),
+            Self::Internal(internal_node) => internal_node.fmt(f),
+            Self::Leaf(leaf_node) => leaf_node.fmt(f),
         }
     }
 }

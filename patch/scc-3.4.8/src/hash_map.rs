@@ -49,7 +49,7 @@ use super::hash_table::{HashTable, LockedBucket};
 ///
 /// ### Bucket access
 ///
-/// Bucket arrays are protected by [`sdd`], thus allowing lock-free access to them.
+/// Bucket arrays are protected by [`sdd`], thus enabling lock-free access to them.
 ///
 /// ### Entry access
 ///

@@ -1,12 +1,14 @@
 use std::mem::forget;
 use std::ops::RangeBounds;
-use std::ptr;
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
+use std::{fmt, ptr};
 
 use saa::Lock;
 use sdd::{AtomicShared, Guard, Ptr, Shared, Tag};
 
-use super::leaf::{InsertResult, Iter, Leaf, RemoveResult, RevIter};
+use super::leaf::{
+    Array, ArrayIter, ArrayRevIter, InsertResult, Iter, Leaf, RemoveResult, RevIter,
+};
 use super::leaf_node::Locker as LeafNodeLocker;
 use super::leaf_node::{LeafNode, RemoveRangeState};
 use super::node::Node;
@@ -17,13 +19,13 @@ use crate::async_helper::TryWait;
 ///
 /// The layout of an internal node: `|ptr(children)/max(child keys)|...|ptr(children)|`.
 pub struct InternalNode<K, V> {
-    /// Children of the [`InternalNode`].
-    pub(super) children: Leaf<K, AtomicShared<Node<K, V>>>,
     /// A child [`Node`] that has no upper key bound.
     ///
     /// It stores the maximum key in the node, and key-value pairs are first pushed to this [`Node`]
     /// until it splits.
     pub(super) unbounded_child: AtomicShared<Node<K, V>>,
+    /// Children of the [`InternalNode`].
+    pub(super) children: Array<K, AtomicShared<Node<K, V>>>,
     /// [`Lock`] to protect the [`InternalNode`].
     pub(super) lock: Lock,
 }
@@ -38,25 +40,9 @@ impl<K, V> InternalNode<K, V> {
     #[inline]
     pub(super) fn new() -> InternalNode<K, V> {
         InternalNode {
-            children: Leaf::new(),
             unbounded_child: AtomicShared::null(),
+            children: Array::new(),
             lock: Lock::default(),
-        }
-    }
-
-    /// Clears the internal node.
-    #[inline]
-    pub(super) fn clear(&self, guard: &Guard) {
-        let iter = Iter::new(&self.children);
-        for (_, child) in iter {
-            let child_ptr = child.load(Acquire, guard);
-            if let Some(child) = child_ptr.as_ref() {
-                child.clear(guard);
-            }
-        }
-        let unbounded_ptr = self.unbounded_child.load(Acquire, guard);
-        if let Some(unbounded) = unbounded_ptr.as_ref() {
-            unbounded.clear(guard);
         }
     }
 
@@ -91,7 +77,7 @@ where
     {
         loop {
             let (child, metadata) = self.children.min_greater_equal(key);
-            if let Some((_, child)) = child {
+            if let Some(child) = child {
                 if let Some(child) = child.load(Acquire, guard).as_ref() {
                     if self.children.validate(metadata) {
                         // Data race resolution - see `LeafNode::search_entry`.
@@ -120,7 +106,7 @@ where
     {
         loop {
             let (child, metadata) = self.children.min_greater_equal(key);
-            if let Some((_, child)) = child {
+            if let Some(child) = child {
                 if let Some(child) = child.load(Acquire, guard).as_ref() {
                     if self.children.validate(metadata) {
                         // Data race resolution - see `LeafNode::search_entry`.
@@ -145,9 +131,9 @@ where
     pub(super) fn min<'g>(&self, guard: &'g Guard) -> Option<Iter<'g, K, V>> {
         let mut unbounded_ptr = self.unbounded_child.load(Acquire, guard);
         while let Some(unbounded) = unbounded_ptr.as_ref() {
-            let mut iter = Iter::new(&self.children);
-            for (_, child) in iter.by_ref() {
-                let child_ptr = child.load(Acquire, guard);
+            let mut iter = ArrayIter::new(&self.children);
+            for i in iter.by_ref() {
+                let child_ptr = self.children.val(i).load(Acquire, guard);
                 if let Some(child) = child_ptr.as_ref() {
                     if let Some(iter) = child.min(guard) {
                         return Some(iter);
@@ -169,18 +155,18 @@ where
         None
     }
 
-    /// Returns the maximum key entry in the entire tree.
+    /// Returns a [`RevIter`] pointing to the right-most leaf in the entire tree.
     #[inline]
     pub(super) fn max<'g>(&self, guard: &'g Guard) -> Option<RevIter<'g, K, V>> {
         let mut unbounded_ptr = self.unbounded_child.load(Acquire, guard);
         while let Some(unbounded) = unbounded_ptr.as_ref() {
-            let mut rev_iter = RevIter::new(&self.children);
+            let mut rev_iter = ArrayRevIter::new(&self.children);
             if let Some(iter) = unbounded.max(guard) {
                 return Some(iter);
             }
             // `post_remove` may be replacing the retired unbounded child with an existing child.
-            for (_, child) in rev_iter.by_ref() {
-                let child_ptr = child.load(Acquire, guard);
+            for i in rev_iter.by_ref() {
+                let child_ptr = self.children.val(i).load(Acquire, guard);
                 if let Some(child) = child_ptr.as_ref() {
                     if let Some(iter) = child.max(guard) {
                         return Some(iter);
@@ -209,27 +195,43 @@ where
         K: 'g,
         Q: Comparable<K> + ?Sized,
     {
-        let mut unbounded_ptr = self.unbounded_child.load(Acquire, guard);
-        while let Some(unbounded) = unbounded_ptr.as_ref() {
+        loop {
             // Firstly, try to find a key in the optimal child.
-            if let Some((_, child)) = self.children.min_greater_equal(key).0 {
-                let child_ptr = child.load(Acquire, guard);
-                if let Some(child) = child_ptr.as_ref() {
-                    if let Some(iter) = child.approximate::<_, LE>(key, guard) {
-                        return Some(iter);
+            let (child, metadata) = self.children.min_greater_equal(key);
+            if let Some(child) = child {
+                if let Some(child) = child.load(Acquire, guard).as_ref() {
+                    if self.children.validate(metadata) {
+                        if let Some(iter) = child.approximate::<_, LE>(key, guard) {
+                            return Some(iter);
+                        }
+                    } else {
+                        // It is not a hot loop - see `LeafNode::search_entry`.
+                        continue;
                     }
                 } else {
                     // It is not a hot loop - see `LeafNode::search_entry`.
                     continue;
                 }
-            } else if let Some(iter) = unbounded.approximate::<_, LE>(key, guard) {
-                return Some(iter);
             }
 
-            // Secondly, try to find a key in any child.
-            let mut iter = Iter::new(&self.children);
-            for (_, child) in iter.by_ref() {
-                let child_ptr = child.load(Acquire, guard);
+            // Secondly, check the unbounded child.
+            let unbounded_ptr = self.unbounded_child.load(Acquire, guard);
+            if let Some(unbounded) = unbounded_ptr.as_ref() {
+                if self.children.validate(metadata) {
+                    if let Some(iter) = unbounded.approximate::<_, LE>(key, guard) {
+                        return Some(iter);
+                    }
+                } else {
+                    continue;
+                }
+            } else {
+                // Retired.
+                return None;
+            }
+
+            // Lastly, try to find a key in any child.
+            for i in ArrayIter::new(&self.children) {
+                let child_ptr = self.children.val(i).load(Acquire, guard);
                 if let Some(child) = child_ptr.as_ref() {
                     if let Some(iter) = child.approximate::<_, LE>(key, guard) {
                         return Some(iter);
@@ -237,15 +239,13 @@ where
                 }
             }
 
-            let new_ptr = self.unbounded_child.load(Acquire, guard);
-            if unbounded_ptr == new_ptr && self.children.validate(iter.metadata()) {
+            if unbounded_ptr == self.unbounded_child.load(Acquire, guard)
+                && self.children.validate(metadata)
+            {
                 // All the children are empty or retired.
-                break;
+                return None;
             }
-            unbounded_ptr = new_ptr;
         }
-
-        None
     }
 
     /// Inserts a key-value pair.
@@ -259,7 +259,7 @@ where
     ) -> Result<InsertResult<K, V>, (K, V)> {
         loop {
             let (child, metadata) = self.children.min_greater_equal(&key);
-            if let Some((_, child)) = child {
+            if let Some(child) = child {
                 let child_ptr = child.load(Acquire, guard);
                 if let Some(child_ref) = child_ptr.as_ref() {
                     if self.children.validate(metadata) {
@@ -289,7 +289,6 @@ where
 
             let unbounded_ptr = self.unbounded_child.load(Acquire, guard);
             if let Some(unbounded) = unbounded_ptr.as_ref() {
-                debug_assert!(unbounded_ptr.tag() == Tag::None);
                 if !self.children.validate(metadata) {
                     continue;
                 }
@@ -339,7 +338,7 @@ where
     {
         loop {
             let (child, metadata) = self.children.min_greater_equal(key);
-            if let Some((_, child)) = child {
+            if let Some(child) = child {
                 let child_ptr = child.load(Acquire, guard);
                 if let Some(child) = child_ptr.as_ref() {
                     if self.children.validate(metadata) {
@@ -357,7 +356,6 @@ where
             }
             let unbounded_ptr = self.unbounded_child.load(Acquire, guard);
             if let Some(unbounded) = unbounded_ptr.as_ref() {
-                debug_assert!(unbounded_ptr.tag() == Tag::None);
                 if !self.children.validate(metadata) {
                     // Data race resolution - see `LeafNode::search_entry`.
                     continue;
@@ -402,7 +400,9 @@ where
         let mut lower_border = None;
         let mut upper_border = None;
 
-        for (key, node) in Iter::new(&self.children) {
+        for i in ArrayIter::new(&self.children) {
+            let key = self.children.key(i);
+            let node = self.children.val(i);
             current_state = current_state.next(key, range, start_unbounded);
             match current_state {
                 RemoveRangeState::Below => {
@@ -417,17 +417,13 @@ where
                     // There can be another thread inserting keys into the node, and this may
                     // render those concurrent operations completely ineffective.
                     self.children.remove_if(key, &mut |_| true);
-                    if let Some(node) = node.swap((None, Tag::None), AcqRel).0 {
-                        node.clear(guard);
-                    }
+                    node.swap((None, Tag::None), AcqRel);
                 }
                 RemoveRangeState::MaybeAbove => {
                     if valid_upper_min_node.is_some() {
                         // `valid_upper_min_node` is not in this sub-tree.
                         self.children.remove_if(key, &mut |_| true);
-                        if let Some(node) = node.swap((None, Tag::None), AcqRel).0 {
-                            node.clear(guard);
-                        }
+                        node.swap((None, Tag::None), AcqRel);
                     } else {
                         num_children += 1;
                         upper_border.replace(node);
@@ -734,19 +730,19 @@ where
         };
 
         let mut max_key_entry = None;
-        let mut iter = Iter::new(&self.children);
-        while let Some((key, node)) = iter.next() {
+        for i in ArrayIter::new(&self.children) {
+            let node = self.children.val(i);
             let node_ptr = node.load(Acquire, guard);
             let node_ref = node_ptr.as_ref().unwrap();
             if node_ref.is_retired() {
-                let result = iter.remove_unchecked();
+                let result = self.children.remove_unchecked(self.children.metadata(), i);
                 debug_assert_ne!(result, RemoveResult::Fail);
 
                 // Once the key is removed, it is safe to deallocate the node as the validation
                 // loop ensures the absence of readers.
                 node.swap((None, Tag::None), Release);
             } else {
-                max_key_entry.replace((key, node));
+                max_key_entry.replace((self.children.key(i), node));
             }
         }
 
@@ -755,17 +751,10 @@ where
         let fully_empty = if let Some(unbounded) = unbounded_ptr.as_ref() {
             if unbounded.is_retired() {
                 if let Some((key, max_key_child)) = max_key_entry {
-                    if let Some(obsolete_node) = self
-                        .unbounded_child
-                        .swap(
-                            (max_key_child.get_shared(Relaxed, guard), Tag::None),
-                            Release,
-                        )
-                        .0
-                    {
-                        debug_assert!(obsolete_node.is_retired());
-                        let _: bool = obsolete_node.release();
-                    }
+                    self.unbounded_child.swap(
+                        (max_key_child.get_shared(Relaxed, guard), Tag::None),
+                        Release,
+                    );
                     self.children.remove_if(key, &mut |_| true);
                     max_key_child.swap((None, Tag::None), Release);
                     false
@@ -783,7 +772,6 @@ where
                 false
             }
         } else {
-            debug_assert!(unbounded_ptr.tag() != Tag::None);
             true
         };
 
@@ -793,6 +781,34 @@ where
         } else {
             RemoveResult::Success
         }
+    }
+}
+
+impl<K, V> fmt::Debug for InternalNode<K, V>
+where
+    K: 'static + Clone + fmt::Debug + Ord,
+    V: 'static + fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let guard = Guard::new();
+        f.write_str("InternalNode { ")?;
+        write!(f, "retired: {}, ", self.is_retired())?;
+        self.children.for_each(|i, rank, entry, removed| {
+            if let Some((k, l)) = entry {
+                if let Some(l) = l.load(Acquire, &guard).as_ref() {
+                    write!(f, "{i}: ({k:?}, {rank}, removed: {removed}, {l:?}), ")?;
+                } else {
+                    write!(f, "{i}: ({k:?}, {rank}, removed: {removed}, null), ")?;
+                }
+            }
+            Ok(())
+        })?;
+        if let Some(unbounded) = self.unbounded_child.load(Acquire, &guard).as_ref() {
+            write!(f, "unbounded: {unbounded:?}")?;
+        } else {
+            write!(f, "unbounded: null")?;
+        }
+        f.write_str(" }")
     }
 }
 
@@ -831,12 +847,12 @@ mod test {
 
     fn new_level_3_node() -> InternalNode<usize, usize> {
         InternalNode {
-            children: Leaf::new(),
             unbounded_child: AtomicShared::new(Node::Internal(InternalNode {
-                children: Leaf::new(),
                 unbounded_child: AtomicShared::new(Node::new_leaf_node()),
+                children: Array::new(),
                 lock: Lock::default(),
             })),
+            children: Array::new(),
             lock: Lock::default(),
         }
     }
@@ -1046,7 +1062,7 @@ mod test {
                                     assert_eq!(*f, *v);
                                     assert!(*f <= fixed_point);
                                 } else {
-                                    let (f, v) = min_iter.jump(&guard).unwrap().get().unwrap();
+                                    let (f, v) = min_iter.jump(&guard).unwrap();
                                     assert_eq!(*f, *v);
                                     assert!(*f <= fixed_point);
                                 }

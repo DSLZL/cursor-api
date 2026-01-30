@@ -3,7 +3,7 @@
 [![Cargo](https://img.shields.io/crates/v/scc)](https://crates.io/crates/scc)
 ![Crates.io](https://img.shields.io/crates/l/scc)
 
-A collection of high-performance asynchronous/concurrent containers providing both asynchronous and synchronous interfaces.
+A collection of high-performance asynchronous/concurrent containers with both asynchronous and synchronous interfaces.
 
 #### Features
 
@@ -31,7 +31,7 @@ Read/write access to an entry is serialized by the read-write lock in the bucket
 
 #### Resize: lock-free
 
-Resizing of a [`HashMap`](#hashmap) is entirely non-blocking and lock-free; resizing does not block any other read/write access to the container or resizing attempts. _Resizing is analogous to pushing a new bucket array into a lock-free stack_. Each entry in the old bucket array will be incrementally relocated to the new bucket array upon future access to the container, and the old bucket array will eventually be dropped after it becomes empty.
+Resizing of a [`HashMap`](#hashmap) is entirely non-blocking and lock-free; resizing does not block any other read/write access to the container or resizing attempts. _Resizing is analogous to pushing a new bucket array into a lock-free stack_. Each entry in the old bucket array is incrementally relocated to the new bucket array upon future access to the container, and the old bucket array is eventually dropped after it becomes empty.
 
 ### Examples
 
@@ -56,7 +56,7 @@ let future_insert = hashmap.insert_async(2, 1);
 let future_remove = hashmap.remove_async(&1);
 ```
 
-The `Entry` API of [`HashMap`](#hashmap) is helpful if the workflow is complicated.
+The `Entry` API of [`HashMap`](#hashmap) is helpful for complicated workflows.
 
 ```rust
 use scc::HashMap;
@@ -70,7 +70,7 @@ hashmap.entry_sync(4).and_modify(|v| { *v += 1 }).or_insert(5);
 assert_eq!(hashmap.read_sync(&4, |_, v| *v), Some(5));
 ```
 
-[`HashMap`](#hashmap) does not provide an [`Iterator`](https://doc.rust-lang.org/std/iter/trait.Iterator.html) since it is impossible to confine the lifetime of [`Iterator::Item`](https://doc.rust-lang.org/std/iter/trait.Iterator.html#associatedtype.Item) to the [Iterator](https://doc.rust-lang.org/std/iter/trait.Iterator.html). The limitation can be circumvented by relying on interior mutability, e.g., letting the returned reference hold a lock. However, it may lead to a deadlock if not correctly used, and frequent acquisition of locks may impact performance. Therefore, [`Iterator`](https://doc.rust-lang.org/std/iter/trait.Iterator.html) is not implemented; instead, [`HashMap`](#hashmap) provides several methods to iterate over entries synchronously or asynchronously: `iter_{async|sync}`, `iter_mut_{async|sync}`, `retain_{async|sync}`, `begin_{async|sync}`, `OccupiedEntry::next_{async|sync}`, and `OccupiedEntry::remove_and_{async|sync}`
+[`HashMap`](#hashmap) does not provide an [`Iterator`](https://doc.rust-lang.org/std/iter/trait.Iterator.html) since it is impossible to confine the lifetime of [`Iterator::Item`](https://doc.rust-lang.org/std/iter/trait.Iterator.html#associatedtype.Item) to the [Iterator](https://doc.rust-lang.org/std/iter/trait.Iterator.html). The limitation can be circumvented by relying on interior mutability, for example, letting the returned reference hold a lock. However, this may lead to a deadlock if not used correctly, and frequent acquisition of locks may impact performance. Therefore, [`Iterator`](https://doc.rust-lang.org/std/iter/trait.Iterator.html) is not implemented; instead, [`HashMap`](#hashmap) provides several methods to iterate over entries synchronously or asynchronously: `iter_{async|sync}`, `iter_mut_{async|sync}`, `retain_{async|sync}`, `begin_{async|sync}`, `OccupiedEntry::next_{async|sync}`, and `OccupiedEntry::remove_and_{async|sync}`
 
 ```rust
 use scc::HashMap;
@@ -82,7 +82,11 @@ assert!(hashmap.insert_sync(2, 1).is_ok());
 
 // Entries can be modified or removed via `retain_sync`.
 let mut acc = 0;
-hashmap.retain_sync(|k, v_mut| { acc += *k; *v_mut = 2; true });
+hashmap.retain_sync(|k, v_mut| {
+    acc += *k;
+    *v_mut = 2;
+    true
+});
 assert_eq!(acc, 3);
 assert_eq!(hashmap.read_sync(&1, |_, v| *v).unwrap(), 2);
 assert_eq!(hashmap.read_sync(&2, |_, v| *v).unwrap(), 2);
@@ -105,7 +109,10 @@ fn is_send<T: Send>(f: &T) -> bool {
 }
 
 // Asynchronous iteration over entries using `iter_async`.
-let future_scan = hashmap.iter_async(|k, v| { println!("{k} {v}"); true });
+let future_scan = hashmap.iter_async(|k, v| {
+    println!("{k} {v}");
+    true
+});
 assert!(is_send(&future_scan));
 
 // Asynchronous iteration over entries using the `Entry` API.
@@ -127,7 +134,7 @@ assert!(is_send(&future_iter));
 
 ### Examples
 
-Most [`HashSet`](#hashset) methods are identical to those of [`HashMap`](#hashmap) except that they do not receive a value argument, and some [`HashMap`](#hashmap) methods for value modification are not implemented for [`HashSet`](#hashset).
+[`HashSet`](#hashset) methods are identical to those of [`HashMap`](#hashmap) except that they do not receive a value argument, and some [`HashMap`](#hashmap) methods for value modification are not implemented for [`HashSet`](#hashset).
 
 ```rust
 use scc::HashSet;
@@ -148,7 +155,7 @@ let future_remove = hashset.remove_async(&1);
 
 ### Entry lifetime
 
-The `HashIndex` does not drop removed entries immediately; instead, they are dropped only when the bucket is accessed again after the [`sdd`](https://crates.io/crates/sdd) mechanism ensures there are no potential readers for those entries. This implies that a removed entry may persist as long as there are potential readers or the bucket remains unaccessed. As a result, `HashIndex` is not an optimal choice for workloads that are write-heavy and involve large entry sizes.
+The `HashIndex` does not drop removed entries immediately; instead, they are dropped only when the bucket is accessed again after the [`sdd`](https://crates.io/crates/sdd) mechanism ensures there are no potential readers for those entries. This implies that a removed entry may persist as long as there are potential readers or the bucket remains unaccessed. As a result, `HashIndex` is not an optimal choice for write-heavy workloads that involve large entry sizes.
 
 ### Examples
 
@@ -323,7 +330,7 @@ assert_eq!(treeindex.range(4..=8, &guard).count(), 5);
 
 The expected tail latency of a distribution of latencies of 1048576 insertion operations (`K = u64, V = u64`) is less than 50 microseconds on Apple M4 Pro.
 
-### [`HashMap`](#hashmap) and [`HashIndex`](#hashindex) Throughput
+### [`HashMap`](#hashmap), [`HashIndex`](#hashindex), and [`TreeIndex`](#treeindex) Throughput
 
 - [Results on Intel Xeon (48 cores, avx2)](https://codeberg.org/wvwwvwwv/conc-map-bench).
 

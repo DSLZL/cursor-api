@@ -1,14 +1,14 @@
 use std::cmp::Ordering::{Equal, Greater, Less};
 use std::mem::forget;
 use std::ops::{Bound, RangeBounds};
-use std::ptr;
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
+use std::{fmt, ptr};
 
 use saa::Lock;
 use sdd::{AtomicShared, Guard, Ptr, Shared, Tag};
 
 use super::Leaf;
-use super::leaf::{InsertResult, Iter, RemoveResult, RevIter, range_contains};
+use super::leaf::{Array, ArrayIter, InsertResult, Iter, RemoveResult, RevIter, range_contains};
 use super::node::Node;
 use crate::Comparable;
 use crate::async_helper::TryWait;
@@ -18,13 +18,13 @@ use crate::exit_guard::ExitGuard;
 ///
 /// The layout of a leaf node: `|ptr(entry array)/max(child keys)|...|ptr(entry array)|`
 pub struct LeafNode<K, V> {
-    /// Children of the [`LeafNode`].
-    pub(super) children: Leaf<K, AtomicShared<Leaf<K, V>>>,
     /// A child [`Leaf`] that has no upper key bound.
     ///
     /// It stores the maximum key in the node, and key-value pairs are first pushed to this
     /// [`Leaf`] until it splits.
     pub(super) unbounded_child: AtomicShared<Leaf<K, V>>,
+    /// Children of the [`LeafNode`].
+    pub(super) children: Array<K, AtomicShared<Leaf<K, V>>>,
     /// [`Lock`] to protect the [`LeafNode`].
     pub(super) lock: Lock,
 }
@@ -54,30 +54,9 @@ impl<K, V> LeafNode<K, V> {
     #[inline]
     pub(super) fn new() -> LeafNode<K, V> {
         LeafNode {
-            children: Leaf::new(),
             unbounded_child: AtomicShared::null(),
+            children: Array::new(),
             lock: Lock::default(),
-        }
-    }
-
-    /// Clears the leaf node by unlinking all the leaves.
-    #[inline]
-    pub(super) fn clear(&self, guard: &Guard) {
-        // Mark the unbounded to prevent any on-going split operation to cleanup itself.
-        self.unbounded_child
-            .update_tag_if(Tag::First, |_| true, Release, Relaxed);
-
-        // Unlink all the children
-        let iter = Iter::new(&self.children);
-        for (_, child) in iter {
-            let child_ptr = child.load(Acquire, guard);
-            if let Some(child) = child_ptr.as_ref() {
-                child.unlink(guard);
-            }
-        }
-        let unbounded_ptr = self.unbounded_child.load(Acquire, guard);
-        if let Some(unbounded) = unbounded_ptr.as_ref() {
-            unbounded.unlink(guard);
         }
     }
 
@@ -102,7 +81,7 @@ where
     {
         loop {
             let (child, metadata) = self.children.min_greater_equal(key);
-            if let Some((_, child)) = child {
+            if let Some(child) = child {
                 if let Some(child) = child.load(Acquire, guard).as_ref() {
                     if self.children.validate(metadata) {
                         // Data race with split.
@@ -144,11 +123,11 @@ where
     {
         loop {
             let (child, metadata) = self.children.min_greater_equal(key);
-            if let Some((_, child)) = child {
+            if let Some(child) = child {
                 if let Some(child) = child.load(Acquire, guard).as_ref() {
                     if self.children.validate(metadata) {
                         // Data race resolution - see `LeafNode::search_entry`.
-                        return child.search_value(key);
+                        return child.search_val(key);
                     }
                 }
                 // Data race resolution - see `LeafNode::search_entry`.
@@ -156,7 +135,7 @@ where
                 let unbounded_ptr = self.unbounded_child.load(Acquire, guard);
                 if let Some(unbounded) = unbounded_ptr.as_ref() {
                     if self.children.validate(metadata) {
-                        return unbounded.search_value(key);
+                        return unbounded.search_val(key);
                     }
                 } else {
                     return None;
@@ -165,12 +144,12 @@ where
         }
     }
 
-    /// Returns the minimum key entry in the entire tree.
+    /// Returns an [`Iter`] pointing to the left-most leaf in the entire tree.
     #[inline]
     pub(super) fn min<'g>(&self, guard: &'g Guard) -> Option<Iter<'g, K, V>> {
         let mut min_leaf = None;
-        for (_, child) in Iter::new(&self.children) {
-            let child_ptr = child.load(Acquire, guard);
+        for i in ArrayIter::new(&self.children) {
+            let child_ptr = self.children.val(i).load(Acquire, guard);
             if let Some(child) = child_ptr.as_ref() {
                 min_leaf.replace(child);
                 break;
@@ -189,23 +168,19 @@ where
         };
 
         let mut rev_iter = RevIter::new(min_leaf);
-        while let Some(next_rev_iter) = rev_iter.jump(guard) {
-            rev_iter = next_rev_iter;
-        }
+        while rev_iter.jump(guard).is_some() {}
         rev_iter.rewind();
         Some(rev_iter.rev())
     }
 
-    /// Returns the maximum key entry in the entire tree.
+    /// Returns a [`RevIter`] pointing to the right-most leaf in the entire tree.
     #[inline]
     pub(super) fn max<'g>(&self, guard: &'g Guard) -> Option<RevIter<'g, K, V>> {
         let unbounded_ptr = self.unbounded_child.load(Acquire, guard);
         if let Some(unbounded) = unbounded_ptr.as_ref() {
             let mut iter = Iter::new(unbounded);
-            while let Some(next_iter) = iter.jump(guard) {
-                iter = next_iter;
-                iter.rewind();
-            }
+            while iter.jump(guard).is_some() {}
+            iter.rewind();
             return Some(iter.rev());
         }
         // `unbounded_child` being null means that the leaf was retired of empty.
@@ -224,15 +199,21 @@ where
         Q: Comparable<K> + ?Sized,
     {
         let leaf = loop {
-            if let (Some((_, child)), _) = self.children.min_greater_equal(key) {
-                if let Some(child) = child.load(Acquire, guard).as_ref() {
-                    break child;
+            let (child, metadata) = self.children.min_greater_equal(key);
+            if let Some(child) = child {
+                if self.children.validate(metadata) {
+                    if let Some(child) = child.load(Acquire, guard).as_ref() {
+                        break child;
+                    }
                 }
                 // It is not a hot loop - see `LeafNode::search_entry`.
                 continue;
             }
             if let Some(unbounded) = self.unbounded_child.load(Acquire, guard).as_ref() {
-                break unbounded;
+                if self.children.validate(metadata) {
+                    break unbounded;
+                }
+                continue;
             }
             // `unbounded_child` being null means that the leaf was retired of empty.
             return None;
@@ -241,11 +222,10 @@ where
         // Tries to find "any" leaf that contains a reachable entry.
         let origin = Iter::new(leaf);
         let mut iter = origin.clone();
-        if iter.next().is_none() {
-            if let Some(next) = iter.jump(guard) {
-                iter = next;
-            } else if let Some(prev) = origin.rev().jump(guard) {
-                iter = prev.rev();
+        if iter.next().is_none() && iter.jump(guard).is_none() {
+            let mut rev_iter = origin.rev();
+            if rev_iter.jump(guard).is_some() {
+                iter = rev_iter.rev();
             } else {
                 return None;
             }
@@ -258,7 +238,9 @@ where
                     return Some(iter);
                 }
                 // Go to the prev leaf node that shall contain smaller keys.
-                iter = iter.rev().jump(guard)?.rev();
+                let mut rev_iter = iter.rev();
+                rev_iter.jump(guard)?;
+                iter = rev_iter.rev();
                 // Rewind the iterator to point to the smallest key in the leaf.
                 iter.rewind();
             }
@@ -269,7 +251,9 @@ where
                     return Some(rev_iter.rev());
                 }
                 // Go to the next leaf node that shall contain larger keys.
-                rev_iter = rev_iter.rev().jump(guard)?.rev();
+                iter = rev_iter.rev();
+                iter.jump(guard)?;
+                rev_iter = iter.rev();
                 // Rewind the iterator to point to the largest key in the leaf.
                 rev_iter.rewind();
             }
@@ -294,7 +278,7 @@ where
     ) -> Result<InsertResult<K, V>, (K, V)> {
         loop {
             let (child, metadata) = self.children.min_greater_equal(&key);
-            if let Some((_, child)) = child {
+            if let Some(child) = child {
                 let child_ptr = child.load(Acquire, guard);
                 if let Some(child_ref) = child_ptr.as_ref() {
                     if self.children.validate(metadata) {
@@ -397,7 +381,7 @@ where
     {
         loop {
             let (child, metadata) = self.children.min_greater_equal(key);
-            if let Some((_, child)) = child {
+            if let Some(child) = child {
                 let child_ptr = child.load(Acquire, guard);
                 if let Some(child) = child_ptr.as_ref() {
                     if self.children.validate(metadata) {
@@ -461,36 +445,36 @@ where
 
         let mut current_state = RemoveRangeState::Below;
         let mut num_leaves = 1;
-        let mut first_valid_leaf = None;
+        let mut min_max_leaf = None;
 
-        let mut iter = Iter::new(&self.children);
-        while let Some((key, leaf)) = iter.next() {
-            current_state = current_state.next(key, range, start_unbounded);
+        for i in ArrayIter::new(&self.children) {
+            current_state = current_state.next(self.children.key(i), range, start_unbounded);
+            let child = self.children.val(i);
             match current_state {
                 RemoveRangeState::Below | RemoveRangeState::MaybeBelow => {
-                    if let Some(leaf) = leaf.load(Acquire, guard).as_ref() {
+                    if let Some(leaf) = child.load(Acquire, guard).as_ref() {
                         leaf.remove_range(range);
                     }
                     num_leaves += 1;
-                    if first_valid_leaf.is_none() {
-                        first_valid_leaf.replace(leaf);
+                    if min_max_leaf.is_none() {
+                        min_max_leaf.replace(child);
                     }
                 }
                 RemoveRangeState::FullyContained => {
-                    if let Some(leaf) = leaf.swap((None, Tag::None), AcqRel).0 {
+                    if let Some(leaf) = child.swap((None, Tag::None), AcqRel).0 {
                         leaf.unlink(guard);
                     }
                     // There can be another thread inserting keys into the leaf, and this may render
                     // those operations completely ineffective.
-                    iter.remove_unchecked();
+                    self.children.remove_unchecked(self.children.metadata(), i);
                 }
                 RemoveRangeState::MaybeAbove => {
-                    if let Some(leaf) = leaf.load(Acquire, guard).as_ref() {
+                    if let Some(leaf) = child.load(Acquire, guard).as_ref() {
                         leaf.remove_range(range);
                     }
                     num_leaves += 1;
-                    if first_valid_leaf.is_none() {
-                        first_valid_leaf.replace(leaf);
+                    if min_max_leaf.is_none() {
+                        min_max_leaf.replace(child);
                     }
                     break;
                 }
@@ -502,20 +486,11 @@ where
         }
 
         if let Some(valid_lower_max_leaf) = valid_lower_max_leaf {
-            // Connect the specified leaf with the first valid leaf.
-            if first_valid_leaf.is_none() {
-                first_valid_leaf.replace(&self.unbounded_child);
-            }
-            let first_valid_leaf_ptr =
-                first_valid_leaf.map_or(Ptr::null(), |l| l.load(Acquire, guard));
-            valid_lower_max_leaf
-                .next
-                .store(first_valid_leaf_ptr.as_ptr().cast_mut(), Release);
-            if let Some(first_valid_leaf) = first_valid_leaf_ptr.as_ref() {
-                first_valid_leaf
-                    .prev
-                    .store(ptr::from_ref(valid_lower_max_leaf).cast_mut(), Release);
-            }
+            // Splices the max min leaf with the min max leaf.
+            let min_max = min_max_leaf
+                .unwrap_or(&self.unbounded_child)
+                .load(Acquire, guard);
+            Leaf::<K, V>::splice_link(Some(valid_lower_max_leaf), min_max.as_ref(), guard);
         } else if let Some(valid_upper_min_node) = valid_upper_min_node {
             // Connect the unbounded child with the minimum valid leaf in the node.
             valid_upper_min_node.remove_range(
@@ -526,6 +501,12 @@ where
                 async_wait,
                 guard,
             )?;
+        } else if start_unbounded {
+            // `min_max_leaf` becomes the first leaf in the entire tree.
+            let min_max = min_max_leaf
+                .unwrap_or(&self.unbounded_child)
+                .load(Acquire, guard);
+            Leaf::<K, V>::splice_link(None, min_max.as_ref(), guard);
         }
 
         Ok(num_leaves)
@@ -555,10 +536,8 @@ where
             return Err(());
         };
 
-        if self.unbounded_child.tag(Relaxed) != Tag::None
-            || full_leaf_ptr != full_leaf.load(Relaxed, guard)
-        {
-            // The leaf node is being cleared, or the leaf node was already split.
+        if full_leaf_ptr != full_leaf.load(Relaxed, guard) {
+            // The leaf node was already split.
             return Err(());
         }
 
@@ -599,45 +578,68 @@ where
             return Ok(false);
         }
 
+        // Data race with iterators if the following code is executed without new leaves locked.
+        // - T1 and T2 both observe, L1 -> L2.
+        // - T2 splits L1 into L1_1 and L1_2: L1_1 <-> L1_2 (not reachable via tree) <-> L2.
+        // - T1 splits L2 into L2_1 and L2_2: L1_1 <-> L1_2 <-> L2_1 <-> L2_2.
+        // - T1 inserts entries into L2_1.
+        // - T1 range queries get L1, instead of L1_2.
+        // - T1 iterates over entries from L1 and L2, and cannot see entries in L2_1.
+        //
+        // The locking prevents T1 from splitting L2 until L1_2 becomes reachable via tree.
+        low_key_leaf.lock.lock_sync();
+        let low_key_leaf_lock = &low_key_leaf.get_guarded_ref(guard).lock;
+
         if is_high_key_leaf_empty {
+            // Unfreeze the leaf; it now takes ownership of the copied values.
+            let unfrozen_low = low_key_leaf.unfreeze();
+            debug_assert!(unfrozen_low);
+
             target.replace_link(
-                |prev, next, _| {
-                    low_key_leaf.prev.store(target.prev.load(Acquire), Relaxed);
-                    low_key_leaf.next.store(target.next.load(Acquire), Relaxed);
-                    if let Some(prev) = prev {
-                        prev.next.store(low_key_leaf.as_ptr().cast_mut(), Release);
+                |prev_next, next_prev, prev_ptr, next_ptr| {
+                    low_key_leaf.prev.store(prev_ptr.cast_mut(), Relaxed);
+                    low_key_leaf.next.store(next_ptr.cast_mut(), Relaxed);
+                    if let Some(prev_next) = prev_next {
+                        prev_next.store(low_key_leaf.as_ptr().cast_mut(), Release);
                     }
-                    if let Some(next) = next {
-                        next.prev.store(low_key_leaf.as_ptr().cast_mut(), Release);
+                    if let Some(next_prev) = next_prev {
+                        next_prev.store(low_key_leaf.as_ptr().cast_mut(), Release);
                     }
                     // From here, `Iter` can reach the new leaf.
                 },
                 guard,
             );
 
-            // Unfreeze the leaves; the leaf now takes ownership of the copied values.
-            let unfrozen_low = low_key_leaf.unfreeze();
-            debug_assert!(unfrozen_low);
             full_leaf.swap((Some(low_key_leaf), Tag::None), Release);
+            let released = low_key_leaf_lock.release_lock();
+            debug_assert!(released);
         } else {
             let low_key_max = low_key_leaf.max_key().unwrap().clone();
             let high_key_leaf = Shared::new(high_key_leaf);
+
+            // Unfreeze the leaves; those leaves now take ownership of the copied values.
+            let unfrozen_low = low_key_leaf.unfreeze();
+            let unfrozen_high = high_key_leaf.unfreeze();
+            debug_assert!(unfrozen_low && unfrozen_high);
+
             low_key_leaf
                 .next
                 .store(high_key_leaf.as_ptr().cast_mut(), Relaxed);
             high_key_leaf
                 .prev
                 .store(low_key_leaf.as_ptr().cast_mut(), Relaxed);
+            let high_key_leaf_lock = &high_key_leaf.get_guarded_ref(guard).lock;
+            high_key_leaf_lock.lock_sync();
 
             target.replace_link(
-                |prev, next, _| {
-                    low_key_leaf.prev.store(target.prev.load(Acquire), Relaxed);
-                    high_key_leaf.next.store(target.next.load(Acquire), Relaxed);
-                    if let Some(prev) = prev {
-                        prev.next.store(low_key_leaf.as_ptr().cast_mut(), Release);
+                |prev_next, next_prev, prev_ptr, next_ptr| {
+                    low_key_leaf.prev.store(prev_ptr.cast_mut(), Relaxed);
+                    high_key_leaf.next.store(next_ptr.cast_mut(), Relaxed);
+                    if let Some(prev_next) = prev_next {
+                        prev_next.store(low_key_leaf.as_ptr().cast_mut(), Release);
                     }
-                    if let Some(next) = next {
-                        next.prev.store(high_key_leaf.as_ptr().cast_mut(), Release);
+                    if let Some(next_prev) = next_prev {
+                        next_prev.store(high_key_leaf.as_ptr().cast_mut(), Release);
                     }
                     // From here, `Iter` can reach the new leaf.
                 },
@@ -647,23 +649,18 @@ where
             // Take the max key value stored in the low key leaf as the leaf key.
             let result = self
                 .children
-                .insert(low_key_max, AtomicShared::from(low_key_leaf.clone()));
+                .insert(low_key_max, AtomicShared::from(low_key_leaf));
             debug_assert!(matches!(result, InsertResult::Success));
+            let released = low_key_leaf_lock.release_lock();
+            debug_assert!(released);
 
-            // Unfreeze the leaves; those leaves now take ownership of the copied values.
-            let unfrozen_low = low_key_leaf.unfreeze();
-            let unfrozen_high = high_key_leaf.unfreeze();
-            debug_assert!(unfrozen_low && unfrozen_high);
             full_leaf.swap((Some(high_key_leaf), Tag::None), Release);
+            let released = high_key_leaf_lock.release_lock();
+            debug_assert!(released);
         }
 
         // The removed leaf stays frozen: ownership of the copied values is transferred.
         exit_guard.forget();
-
-        // If there was a clear operation in the meantime, new leaves will need to be cleaned up.
-        if self.unbounded_child.tag(Acquire) != Tag::None {
-            self.clear(guard);
-        }
 
         Ok(true)
     }
@@ -678,9 +675,9 @@ where
         };
 
         let mut prev_valid_leaf = None;
-        let mut iter = Iter::new(&self.children);
-        while let Some(entry) = iter.next() {
-            let leaf_ptr = entry.1.load(Acquire, guard);
+        for i in ArrayIter::new(&self.children) {
+            let child = self.children.val(i);
+            let leaf_ptr = child.load(Acquire, guard);
             let leaf = leaf_ptr.as_ref().unwrap();
             if leaf.is_retired() {
                 leaf.unlink(guard);
@@ -688,14 +685,14 @@ where
                 // As soon as the leaf is removed from the leaf node, the next leaf can store keys
                 // that are smaller than those that were previously stored in the removed leaf node.
                 //
-                // Therefore, when unlinking a leaf, the current snapshot of metadata of neighboring
-                // leaves is stored inside the leaf which will be used by iterators.
-                let result = iter.remove_unchecked();
+                // Iterators cope with this by checking the prev/next pointers; right after
+                // `unlink`, the prev/next leaves will not point to this leaf anymore.
+                let result = self.children.remove_unchecked(self.children.metadata(), i);
                 debug_assert_ne!(result, RemoveResult::Fail);
 
                 // The pointer is set to null after the metadata of `self.children` is updated
                 // to enable readers to retry when they find it being null.
-                entry.1.swap((None, Tag::None), Release);
+                child.swap((None, Tag::None), Release);
             } else {
                 prev_valid_leaf.replace(leaf);
             }
@@ -727,6 +724,34 @@ where
         } else {
             RemoveResult::Success
         }
+    }
+}
+
+impl<K, V> fmt::Debug for LeafNode<K, V>
+where
+    K: 'static + Clone + fmt::Debug + Ord,
+    V: 'static + fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let guard = Guard::new();
+        f.write_str("LeafNode { ")?;
+        write!(f, "retired: {}, ", self.is_retired())?;
+        self.children.for_each(|i, rank, entry, removed| {
+            if let Some((k, l)) = entry {
+                if let Some(l) = l.load(Acquire, &guard).as_ref() {
+                    write!(f, "{i}: ({k:?}, {rank}, removed: {removed}, {l:?}), ")?;
+                } else {
+                    write!(f, "{i}: ({k:?}, {rank}, removed: {removed}, null), ")?;
+                }
+            }
+            Ok(())
+        })?;
+        if let Some(unbounded) = self.unbounded_child.load(Acquire, &guard).as_ref() {
+            write!(f, "unbounded: {unbounded:?}")?;
+        } else {
+            write!(f, "unbounded: null")?;
+        }
+        f.write_str(" }")
     }
 }
 
@@ -1051,8 +1076,7 @@ mod test {
                                     assert_eq!(*k_ref, *v_ref);
                                     assert!(*k_ref <= k);
                                 } else {
-                                    let (k_ref, v_ref) =
-                                        min_iter.jump(&guard).unwrap().get().unwrap();
+                                    let (k_ref, v_ref) = min_iter.jump(&guard).unwrap();
                                     assert_eq!(*k_ref, *v_ref);
                                     assert!(*k_ref <= k);
                                 }

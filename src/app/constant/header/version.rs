@@ -106,15 +106,12 @@ pub fn initialize_cursor_version() {
             __cold_path!();
             __eprintln!("Error: Invalid version string for HTTP header");
             // 使用默认版本
-            http::header::HeaderValue::from_static(DEFAULT_CLIENT_VERSION)
+            const { http::header::HeaderValue::from_static(DEFAULT_CLIENT_VERSION) }
         }
     };
 
     // 构建 User-Agent 字符串
-    let (ua_string, default_ua) = {
-        let ua = [UA_PREFIX, version.deref(), CHROME_VERSION_INFO].concat();
-        (ua, DEFAULT_UA)
-    };
+    let ua_string = [UA_PREFIX, version.deref(), CHROME_VERSION_INFO].concat();
 
     let ua_header = match http::header::HeaderValue::from_str(&ua_string) {
         Ok(header) => header,
@@ -122,7 +119,7 @@ pub fn initialize_cursor_version() {
             __cold_path!();
             __eprintln!("Error: Invalid user agent string for HTTP header");
             // 使用默认 UA
-            http::header::HeaderValue::from_static(default_ua)
+            const { http::header::HeaderValue::from_static(DEFAULT_UA) }
         }
     };
 

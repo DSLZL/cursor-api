@@ -1,6 +1,6 @@
 #![allow(internal_features, unsafe_op_in_unsafe_fn)]
 #![feature(core_intrinsics, uint_bit_width, portable_simd, pattern, char_internals, const_convert, const_trait_impl)]
-#![doc(html_root_url = "https://docs.rs/prost/0.14.2")]
+#![doc(html_root_url = "https://docs.rs/prost/0.14.3")]
 #![cfg_attr(not(feature = "std"), no_std)]
 #![doc = include_str!("../README.md")]
 

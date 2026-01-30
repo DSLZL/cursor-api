@@ -2,7 +2,7 @@
 name = "prost-types"
 readme = "README.md"
 description = "Prost definitions of Protocol Buffers well known types."
-version = "0.14.2"
+version = "0.14.3"
 authors = [
     "Dan Burkert <dan@danburkert.com>",
     "Lucio Franco <luciofranco14@gmail.com>",
@@ -23,7 +23,7 @@ std = ["prost/std"]
 arbitrary = ["dep:arbitrary"]
 
 [dependencies]
-prost = { version = "0.14.2", path = "../prost-0.14.1", default-features = false, features = ["derive"] }
+prost = { version = "0.14.3", path = "../prost-0.14.1", default-features = false, features = ["derive"] }
 arbitrary = { version = "1.4", features = ["derive"], optional = true }
 chrono = { version = "0.4.34", default-features = false, optional = true }
 

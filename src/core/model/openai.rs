@@ -44,7 +44,7 @@ pub enum ChatCompletionMessageParam {
     #[serde(rename = "assistant")]
     Assistant {
         content: ChatCompletionContentText,
-        #[serde(with = "option_as_array", skip_serializing_if = "Option::is_none")]
+        #[serde(with = "option_as_array", default, skip_serializing_if = "Option::is_none")]
         tool_calls: Option<Box<ChatCompletionMessageToolCall>>,
     },
     #[serde(rename = "tool")]

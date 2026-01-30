@@ -24,7 +24,7 @@ use super::hash_table::{HashTable, LockedBucket};
 /// Scalable asynchronous/concurrent hash index.
 ///
 /// [`HashIndex`] is an asynchronous/concurrent hash map data structure optimized for parallel read
-/// operations. The key characteristics of [`HashIndex`] are similar to that of
+/// operations. The key characteristics of [`HashIndex`] are similar to those of
 /// [`HashMap`](super::HashMap) except its read operations are lock-free.
 ///
 /// ## The key differences between [`HashIndex`] and [`HashMap`](crate::HashMap).
@@ -39,7 +39,7 @@ use super::hash_table::{HashTable, LockedBucket};
 /// * The expected number of atomic write operations required for an operation on a single key: 2.
 /// * The expected number of atomic variables accessed during a single key operation: 2.
 /// * The number of entries managed by a single bucket without a linked list: 32.
-/// * The expected maximum linked list length when resize is triggered: log(capacity) / 8.
+/// * The expected maximum linked list length when a resize is triggered: log(capacity) / 8.
 ///
 /// ## Unwind safety
 ///
@@ -2071,6 +2071,24 @@ where
         let guard = Guard::new();
         if let Some(current_array) = self.hashindex.bucket_array(&guard) {
             self.try_shrink(current_array, 0, &guard);
+        }
+    }
+}
+
+impl<K, V, H> Clone for Iter<'_, K, V, H>
+where
+    K: Eq + Hash,
+    H: BuildHasher,
+{
+    #[inline]
+    fn clone(&self) -> Self {
+        Self {
+            hashindex: self.hashindex,
+            bucket_array: self.bucket_array,
+            index: self.index,
+            bucket: self.bucket,
+            entry_ptr: self.entry_ptr.clone(),
+            guard: self.guard,
         }
     }
 }

@@ -3,6 +3,32 @@
 
 ## Version 3
 
+3.5.3
+
+* Implement `Clone` for `HashIndex::Iter` and `TreeIndex::{Iter, Range}`.
+
+3.5.2
+
+* Add `TreeIndex::{Iter, Range}::{get, get_back, flip}`.
+
+3.5.1
+
+* Implement `TreeIndex::locate` to locate the nearest key if the key is absent: [#203](https://codeberg.org/wvwwvwwv/scalable-concurrent-containers/issues/203).
+
+3.5.0
+
+* Stabilize `DoubleEndedIterator` for `TreeIndex::{Iter, Range}`: [#217](https://codeberg.org/wvwwvwwv/scalable-concurrent-containers/issues/217).
+* `TreeIndex::{Iter, Range}` performance improvements.
+
+3.4.16
+
+* Optimize linked list modification during `TreeIndex::remove_range*`.
+* Fix data race issues in the `TreeIndex` range iterator.
+
+3.4.15 (yanked)
+
+* Implement `DoubleEndedIterator` for `tree_index::Range`: [#217](https://codeberg.org/wvwwvwwv/scalable-concurrent-containers/issues/217).
+ 
 3.4.14
 
 * Implement `DoubleEndedIterator` for `tree_index::Iter`: [#217](https://codeberg.org/wvwwvwwv/scalable-concurrent-containers/issues/217).

@@ -1255,7 +1255,7 @@ where
         }
     }
 
-    /// Tries to enlarge [`HashTable`] if the estimated load factor is greater than `7/8`.
+    /// Tries to enlarge [`HashTable`] if the estimated load factor is greater than `3/4`.
     fn try_enlarge(
         &self,
         current_array: &BucketArray<K, V, L, TYPE>,
@@ -1264,8 +1264,8 @@ where
         guard: &Guard,
     ) {
         if !current_array.has_linked_array() {
-            // Try to grow if the estimated load factor is greater than `13/16`.
-            let threshold = current_array.sample_size() * (BUCKET_LEN / 16) * 13;
+            // Try to grow if the estimated load factor is greater than `3/4`.
+            let threshold = current_array.sample_size() * (BUCKET_LEN / 4) * 3;
             if num_entries > threshold
                 || (1..current_array.sample_size()).any(|i| {
                     num_entries += current_array
@@ -1331,9 +1331,9 @@ where
         let estimated_num_entries = Self::sample(current_array, sampling_index);
 
         let new_capacity =
-            if capacity < minimum_capacity || estimated_num_entries >= (capacity / 16) * 13 {
+            if capacity < minimum_capacity || estimated_num_entries >= (capacity / 4) * 3 {
                 // Double the capacity if the estimated load factor is equal to or greater than
-                // `13/16`; `~10%` of buckets are expected to have overflow buckets.
+                // `3/4`; `~5%` of buckets are expected to have overflow buckets.
                 if capacity == self.maximum_capacity() {
                     // Do not resize if the capacity cannot be increased.
                     capacity

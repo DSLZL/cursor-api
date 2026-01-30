@@ -13,7 +13,7 @@
 edition = "2021"
 rust-version = "1.82"
 name = "prost"
-version = "0.14.2"
+version = "0.14.3"
 authors = [
     "Dan Burkert <dan@danburkert.com>",
     "Lucio Franco <luciofranco14@gmail.com>",
@@ -53,7 +53,7 @@ indexmap = ["dep:indexmap"]
 byte_str = { version = "0.1.0", path = "../../crates/byte_str", default-features = false }
 bytes = { version = "1", default-features = false }
 indexmap = { version = "2.12.1", default-features = false, optional = true }
-prost-derive = { version = "0.14.2", path = "../prost-derive", optional = true }
+prost-derive = { version = "0.14.3", path = "../prost-derive", optional = true }
 proto-value = { version = "0.1.0", path = "../../crates/proto-value", default-features = false }
 
 [dev-dependencies]

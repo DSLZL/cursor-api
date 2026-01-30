@@ -5,7 +5,7 @@ mod leaf;
 mod leaf_node;
 mod node;
 
-use std::fmt::{self, Debug};
+use std::fmt;
 use std::iter::FusedIterator;
 use std::marker::PhantomData;
 use std::ops::Bound::{Excluded, Included, Unbounded};
@@ -25,7 +25,7 @@ use node::Node;
 
 /// Scalable asynchronous/concurrent B-plus tree.
 ///
-/// [`TreeIndex`] is a asynchronous/concurrent B-plus tree variant optimized for read operations.
+/// [`TreeIndex`] is an asynchronous/concurrent B-plus tree variant optimized for read operations.
 /// Read operations, such as read iteration over entries, are neither blocked nor interrupted by
 /// other threads or tasks. Write operations, such as insert and remove, do not block if structural
 /// changes are not required.
@@ -82,11 +82,38 @@ pub struct Iter<'t, 'g, K, V> {
 /// An iterator over a sub-range of entries in a [`TreeIndex`].
 pub struct Range<'t, 'g, K, V, Q: ?Sized, R: RangeBounds<Q>> {
     root: &'t AtomicShared<Node<K, V>>,
-    leaf_iter: Option<LeafIter<'g, K, V>>,
+    forward: Option<LeafIter<'g, K, V>>,
+    backward: Option<LeafRevIter<'g, K, V>>,
     bounds: R,
     check_upper_bound: bool,
+    check_lower_bound: bool,
     guard: &'g Guard,
     query: PhantomData<fn() -> Q>,
+}
+
+/// Proximity of the [`Iter`] to the key passed to [`TreeIndex::locate`].
+pub enum Proximity<'t, 'g, K, V> {
+    /// [`Iter`] that points to the exact key.
+    ///
+    /// [`Iter::get`] returns the exact key.
+    Exact(Iter<'t, 'g, K, V>),
+    /// [`Iter`] that points to the closest smaller key and the closest larger key.
+    ///
+    /// [`Iter::get`] returns the closest smaller key, and [`Iter::get_back`] returns the closest
+    /// larger key.
+    Between(Iter<'t, 'g, K, V>),
+    /// [`Iter`] that points to the closest smaller key.
+    ///
+    /// The [`TreeIndex`] does not contain any larger keys than the specified key, and
+    /// [`Iter::get_back`] returns the closest smaller key.
+    Smaller(Iter<'t, 'g, K, V>),
+    /// [`Iter`] that points to the closest larger key.
+    ///
+    /// The [`TreeIndex`] does not contain any smaller keys than the specified key, and
+    /// [`Iter::get`] returns the closest larger key.
+    Larger(Iter<'t, 'g, K, V>),
+    /// The [`TreeIndex`] is empty.
+    Empty,
 }
 
 impl<K, V> TreeIndex<K, V> {
@@ -132,9 +159,7 @@ impl<K, V> TreeIndex<K, V> {
     /// ```
     #[inline]
     pub fn clear(&self) {
-        if let (Some(root), _) = self.root.swap((None, Tag::None), Acquire) {
-            root.clear(&Guard::new());
-        }
+        self.root.swap((None, Tag::None), Acquire);
     }
 
     /// Returns the depth of the [`TreeIndex`].
@@ -154,7 +179,7 @@ impl<K, V> TreeIndex<K, V> {
         self.root
             .load(Acquire, &guard)
             .as_ref()
-            .map_or(0, |root_ref| root_ref.depth(1, &guard))
+            .map_or(0, |root| root.depth(1, &guard))
     }
 }
 
@@ -184,8 +209,8 @@ where
             {
                 let guard = Guard::new();
                 let root_ptr = self.root.load(Acquire, &guard);
-                if let Some(root_ref) = root_ptr.as_ref() {
-                    match root_ref.insert(key, val, &mut pinned_async_wait, &guard) {
+                if let Some(root) = root_ptr.as_ref() {
+                    match root.insert(key, val, &mut pinned_async_wait, &guard) {
                         Ok(r) => match r {
                             InsertResult::Success => return Ok(()),
                             InsertResult::Duplicate(k, v) | InsertResult::Frozen(k, v) => {
@@ -242,8 +267,8 @@ where
         loop {
             let guard = Guard::new();
             let root_ptr = self.root.load(Acquire, &guard);
-            if let Some(root_ref) = root_ptr.as_ref() {
-                match root_ref.insert(key, val, &mut (), &guard) {
+            if let Some(root) = root_ptr.as_ref() {
+                match root.insert(key, val, &mut (), &guard) {
                     Ok(r) => match r {
                         InsertResult::Success => return Ok(()),
                         InsertResult::Duplicate(k, v) | InsertResult::Frozen(k, v) => {
@@ -345,8 +370,8 @@ where
         loop {
             {
                 let guard = Guard::new();
-                if let Some(root_ref) = self.root.load(Acquire, &guard).as_ref() {
-                    if let Ok(result) = root_ref.remove_if::<_, _, _>(
+                if let Some(root) = self.root.load(Acquire, &guard).as_ref() {
+                    if let Ok(result) = root.remove_if::<_, _, _>(
                         key,
                         &mut condition,
                         &mut pinned_async_wait,
@@ -410,9 +435,8 @@ where
         let mut removed = false;
         loop {
             let guard = Guard::new();
-            if let Some(root_ref) = self.root.load(Acquire, &guard).as_ref() {
-                if let Ok(result) =
-                    root_ref.remove_if::<_, _, _>(key, &mut condition, &mut (), &guard)
+            if let Some(root) = self.root.load(Acquire, &guard).as_ref() {
+                if let Ok(result) = root.remove_if::<_, _, _>(key, &mut condition, &mut (), &guard)
                 {
                     match result {
                         RemoveResult::Success => return true,
@@ -478,8 +502,8 @@ where
                 // Remove internal nodes, and individual entries in affected leaves.
                 //
                 // It takes O(N) to traverse sub-trees on the range border.
-                if let Some(root_ref) = self.root.load(Acquire, &guard).as_ref() {
-                    if let Ok(num_children) = root_ref.remove_range(
+                if let Some(root) = self.root.load(Acquire, &guard).as_ref() {
+                    if let Ok(num_children) = root.remove_range(
                         &range,
                         start_unbounded,
                         None,
@@ -540,9 +564,9 @@ where
         // Remove internal nodes, and individual entries in affected leaves.
         //
         // It takes O(N) to traverse sub-trees on the range border.
-        while let Some(root_ref) = self.root.load(Acquire, &guard).as_ref() {
+        while let Some(root) = self.root.load(Acquire, &guard).as_ref() {
             if let Ok(num_children) =
-                root_ref.remove_range(&range, start_unbounded, None, None, &mut (), &guard)
+                root.remove_range(&range, start_unbounded, None, None, &mut (), &guard)
             {
                 if num_children < 2 && !Node::cleanup_root(&self.root, &mut (), &guard) {
                     continue;
@@ -578,8 +602,8 @@ where
     where
         Q: Comparable<K> + ?Sized,
     {
-        if let Some(root_ref) = self.root.load(Acquire, guard).as_ref() {
-            return root_ref.search_value(key, guard);
+        if let Some(root) = self.root.load(Acquire, guard).as_ref() {
+            return root.search_value(key, guard);
         }
         None
     }
@@ -644,8 +668,8 @@ where
     where
         Q: Comparable<K> + ?Sized,
     {
-        if let Some(root_ref) = self.root.load(Acquire, guard).as_ref() {
-            return root_ref.search_entry(key, guard);
+        if let Some(root) = self.root.load(Acquire, guard).as_ref() {
+            return root.search_entry(key, guard);
         }
         None
     }
@@ -766,6 +790,139 @@ where
     {
         Range::new(&self.root, range, guard)
     }
+
+    /// Returns a [`Proximity`] optionally containing an [`Iter`] that points to the entry with the
+    /// specified key or the closest one if the [`TreeIndex`] is not empty.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use scc::TreeIndex;
+    /// use scc::tree_index::Proximity;
+    ///
+    /// use sdd::Guard;
+    ///
+    /// let treeindex: TreeIndex<u64, u32> = TreeIndex::new();
+    ///
+    /// assert!(treeindex.insert_sync(1, 1).is_ok());
+    /// assert!(treeindex.insert_sync(3, 2).is_ok());
+    /// assert!(treeindex.insert_sync(5, 3).is_ok());
+    /// assert!(treeindex.insert_sync(7, 4).is_ok());
+    ///
+    /// let guard = Guard::new();
+    ///
+    /// let Proximity::Exact(iter) = treeindex.locate(&5, &guard) else {
+    ///     unreachable!();
+    /// };
+    /// assert_eq!(iter.get(), Some((&5, &3)));
+    ///
+    /// let Proximity::Between(mut iter) = treeindex.locate(&2, &guard) else {
+    ///     unreachable!();
+    /// };
+    /// assert_eq!(iter.get(), Some((&1, &1)));
+    /// assert_eq!(iter.get_back(), Some((&3, &2)));
+    /// assert!(iter.next().is_none());
+    /// assert!(iter.next_back().is_none());
+    ///
+    /// let Proximity::Smaller(iter) = treeindex.locate(&8, &guard) else {
+    ///     unreachable!();
+    /// };
+    /// assert_eq!(iter.get_back(), Some((&7, &4)));
+    ///
+    /// let Proximity::Larger(iter) = treeindex.locate(&0, &guard) else {
+    ///     unreachable!();
+    /// };
+    /// assert_eq!(iter.get(), Some((&1, &1)));
+    ///
+    /// treeindex.clear();
+    ///
+    /// let Proximity::Empty = treeindex.locate(&3, &guard) else {
+    ///     unreachable!();
+    /// };
+    /// ```
+    pub fn locate<'t, 'g, Q>(&'t self, key: &Q, guard: &'g Guard) -> Proximity<'t, 'g, K, V>
+    where
+        Q: Comparable<K> + ?Sized,
+    {
+        if let Some(root) = self.root.load(Acquire, guard).as_ref() {
+            if let Some(mut iter) = root.approximate::<_, true>(key, guard) {
+                // Found a key that exactly matches the specified one or smaller.
+                let mut prev_iter = iter.clone();
+                while let Some((k, _)) = iter.get() {
+                    let comparison = key.compare(k);
+                    if comparison.is_eq() {
+                        // Exact match found.
+                        return Proximity::Exact(Iter {
+                            root: &self.root,
+                            forward: Some(iter),
+                            backward: None,
+                            guard,
+                        });
+                    } else if comparison.is_lt() {
+                        // Just passed the key.
+                        return Proximity::Between(Iter {
+                            root: &self.root,
+                            forward: Some(prev_iter),
+                            backward: Some(iter.rev()),
+                            guard,
+                        });
+                    }
+                    prev_iter = iter.clone();
+                    if iter.next().is_none() {
+                        iter.jump(guard);
+                    }
+                }
+                // No keys larger than or equal to the specified one found.
+                if prev_iter.get().is_some() {
+                    return Proximity::Smaller(Iter {
+                        root: &self.root,
+                        forward: None,
+                        backward: Some(prev_iter.rev()),
+                        guard,
+                    });
+                }
+            }
+            if let Some(iter) = root.approximate::<_, false>(key, guard) {
+                // Found a key that exactly matches the specified one or greater.
+                let mut rev_iter = iter.rev();
+                let mut prev_rev_iter = rev_iter.clone();
+                while let Some((k, _)) = rev_iter.get() {
+                    let comparison = key.compare(k);
+                    if comparison.is_eq() {
+                        // Exact match found.
+                        return Proximity::Exact(Iter {
+                            root: &self.root,
+                            forward: Some(rev_iter.rev()),
+                            backward: None,
+                            guard,
+                        });
+                    } else if comparison.is_gt() {
+                        // Just passed the key.
+                        return Proximity::Between(Iter {
+                            root: &self.root,
+                            forward: Some(rev_iter.rev()),
+                            backward: Some(prev_rev_iter),
+                            guard,
+                        });
+                    }
+                    prev_rev_iter = rev_iter.clone();
+                    if rev_iter.next().is_none() {
+                        rev_iter.jump(guard);
+                    }
+                }
+                // No keys smaller than or equal to the specified one found.
+                if prev_rev_iter.get().is_some() {
+                    return Proximity::Larger(Iter {
+                        root: &self.root,
+                        forward: Some(prev_rev_iter.rev()),
+                        backward: None,
+                        guard,
+                    });
+                }
+            }
+        }
+        Proximity::Empty
+    }
 }
 
 impl<K, V> Clone for TreeIndex<K, V>
@@ -783,15 +940,19 @@ where
     }
 }
 
-impl<K, V> Debug for TreeIndex<K, V>
+impl<K, V> fmt::Debug for TreeIndex<K, V>
 where
-    K: 'static + Clone + Debug + Ord,
-    V: 'static + Debug,
+    K: 'static + Clone + fmt::Debug + Ord,
+    V: 'static + fmt::Debug,
 {
-    #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let guard = Guard::new();
-        f.debug_map().entries(self.iter(&guard)).finish()
+        f.write_str("TreeIndex { ")?;
+        if let Some(root) = self.root.load(Acquire, &guard).as_ref() {
+            f.write_str(" root: ")?;
+            root.fmt(f)?;
+        }
+        f.write_str(" }")
     }
 }
 
@@ -811,13 +972,6 @@ impl<K, V> Default for TreeIndex<K, V> {
     }
 }
 
-impl<K, V> Drop for TreeIndex<K, V> {
-    #[inline]
-    fn drop(&mut self) {
-        self.clear();
-    }
-}
-
 impl<K, V> PartialEq for TreeIndex<K, V>
 where
     K: 'static + Clone + Ord,
@@ -834,6 +988,116 @@ where
 impl<K, V> UnwindSafe for TreeIndex<K, V> {}
 
 impl<'t, 'g, K, V> Iter<'t, 'g, K, V> {
+    /// Returns the entry that the forward iterator points to.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use scc::TreeIndex;
+    ///
+    /// use sdd::Guard;
+    ///
+    /// let treeindex: TreeIndex<u64, u32> = TreeIndex::new();
+    ///
+    /// assert!(treeindex.insert_sync(1, 2).is_ok());
+    ///
+    /// let guard = Guard::new();
+    /// let mut iter = treeindex.iter(&guard);
+    /// assert_eq!(iter.next(), Some((&1, &2)));
+    /// assert_eq!(iter.get(), Some((&1, &2)));
+    /// assert_eq!(iter.next(), None);
+    /// assert_eq!(iter.get(), None);
+    /// ```
+    #[inline]
+    #[must_use]
+    pub const fn get(&self) -> Option<(&'g K, &'g V)> {
+        if let Some(iter) = self.forward.as_ref() {
+            iter.get()
+        } else {
+            None
+        }
+    }
+
+    /// Returns the entry that the backward iterator points to.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use scc::TreeIndex;
+    ///
+    /// use sdd::Guard;
+    ///
+    /// let treeindex: TreeIndex<u64, u32> = TreeIndex::new();
+    ///
+    /// assert!(treeindex.insert_sync(1, 2).is_ok());
+    ///
+    /// let guard = Guard::new();
+    /// let mut iter = treeindex.iter(&guard);
+    /// assert_eq!(iter.next_back(), Some((&1, &2)));
+    /// assert_eq!(iter.get_back(), Some((&1, &2)));
+    /// assert_eq!(iter.next_back(), None);
+    /// assert_eq!(iter.get_back(), None);
+    /// ```
+    #[inline]
+    #[must_use]
+    pub const fn get_back(&self) -> Option<(&'g K, &'g V)> {
+        if let Some(rev_iter) = self.backward.as_ref() {
+            rev_iter.get()
+        } else {
+            None
+        }
+    }
+
+    /// Changes the direction of the iterator if only one end of the iterator is open.
+    ///
+    /// Returns `false` if the iterator is already bidirectional or was exhausted.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use scc::TreeIndex;
+    ///
+    /// use sdd::Guard;
+    ///
+    /// let treeindex: TreeIndex<u64, u32> = TreeIndex::new();
+    ///
+    /// assert!(treeindex.insert_sync(1, 2).is_ok());
+    /// assert!(treeindex.insert_sync(2, 2).is_ok());
+    /// assert!(treeindex.insert_sync(3, 2).is_ok());
+    ///
+    /// let guard = Guard::new();
+    /// let mut iter = treeindex.iter(&guard);
+    ///
+    /// assert_eq!(iter.next_back(), Some((&3, &2)));
+    /// assert_eq!(iter.next_back(), Some((&2, &2)));
+    /// assert!(iter.flip());
+    /// assert_eq!(iter.next(), Some((&3, &2)));
+    /// assert!(iter.flip());
+    ///
+    /// assert_eq!(iter.next_back(), Some((&2, &2)));
+    /// assert_eq!(iter.next(), Some((&1, &2)));
+    /// assert!(iter.next().is_none());
+    /// assert!(!iter.flip());
+    /// ```
+    #[inline]
+    pub const fn flip(&mut self) -> bool {
+        if self.backward.is_none()
+            && self.get().is_some()
+            && let Some(forward) = self.forward.take()
+        {
+            self.backward = Some(forward.rev());
+            return true;
+        }
+        if self.forward.is_none()
+            && self.get_back().is_some()
+            && let Some(backward) = self.backward.take()
+        {
+            self.forward = Some(backward.rev());
+            return true;
+        }
+        self.forward.is_none() && self.backward.is_none()
+    }
+
     #[inline]
     const fn new(root: &'t AtomicShared<Node<K, V>>, guard: &'g Guard) -> Iter<'t, 'g, K, V> {
         Iter::<'t, 'g, K, V> {
@@ -849,8 +1113,9 @@ impl<'g, K, V> Iter<'_, 'g, K, V>
 where
     K: Ord,
 {
+    /// Checks if the both ends of the iterators collide.
     fn check_collision<const FORWARD: bool>(
-        &mut self,
+        &self,
         entry: (&'g K, &'g V),
     ) -> Option<(&'g K, &'g V)> {
         let other_entry = if FORWARD {
@@ -869,11 +1134,27 @@ where
     }
 }
 
-impl<K, V> Debug for Iter<'_, '_, K, V> {
+impl<K, V> Clone for Iter<'_, '_, K, V>
+where
+    K: 'static + Clone + Ord,
+    V: 'static,
+{
+    #[inline]
+    fn clone(&self) -> Self {
+        Self {
+            root: self.root,
+            forward: self.forward.as_ref().map(LeafIter::clone),
+            backward: self.backward.as_ref().map(LeafRevIter::clone),
+            guard: self.guard,
+        }
+    }
+}
+
+impl<K, V> fmt::Debug for Iter<'_, '_, K, V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Iter")
-            .field("root", &self.root)
-            .field("leaf_iter", &self.forward)
+            .field("forward_iter", &self.forward)
+            .field("backward_iter", &self.backward)
             .finish()
     }
 }
@@ -888,8 +1169,8 @@ where
         // Start iteration.
         if self.backward.is_none() {
             let root_ptr = self.root.load(Acquire, self.guard);
-            if let Some(root_ref) = root_ptr.as_ref() {
-                if let Some(rev_iter) = root_ref.max(self.guard) {
+            if let Some(root) = root_ptr.as_ref() {
+                if let Some(rev_iter) = root.max(self.guard) {
                     self.backward.replace(rev_iter);
                 }
             } else {
@@ -900,20 +1181,17 @@ where
         // Go to the prev entry.
         if let Some(rev_iter) = self.backward.as_mut() {
             if let Some(entry) = rev_iter.next() {
-                if self.forward.is_some() {
-                    return self.check_collision::<false>(entry);
-                }
-                return Some(entry);
-            }
-            // Go to the prev leaf node.
-            if let Some(new_rev_iter) = rev_iter.jump(self.guard) {
-                if let Some(entry) = new_rev_iter.get() {
-                    self.backward.replace(new_rev_iter);
-                    if self.forward.is_some() {
-                        return self.check_collision::<false>(entry);
-                    }
+                if self.forward.is_none() {
                     return Some(entry);
                 }
+                return self.check_collision::<false>(entry);
+            }
+            // Go to the prev leaf node.
+            if let Some(entry) = rev_iter.jump(self.guard) {
+                if self.forward.is_none() {
+                    return Some(entry);
+                }
+                return self.check_collision::<false>(entry);
             }
         }
 
@@ -933,8 +1211,8 @@ where
         // Start iteration.
         if self.forward.is_none() {
             let root_ptr = self.root.load(Acquire, self.guard);
-            if let Some(root_ref) = root_ptr.as_ref() {
-                if let Some(iter) = root_ref.min(self.guard) {
+            if let Some(root) = root_ptr.as_ref() {
+                if let Some(iter) = root.min(self.guard) {
                     self.forward.replace(iter);
                 }
             } else {
@@ -945,24 +1223,37 @@ where
         // Go to the next entry.
         if let Some(iter) = self.forward.as_mut() {
             if let Some(entry) = iter.next() {
-                if self.backward.is_some() {
-                    return self.check_collision::<true>(entry);
-                }
-                return Some(entry);
-            }
-            // Go to the next leaf node.
-            if let Some(new_iter) = iter.jump(self.guard) {
-                if let Some(entry) = new_iter.get() {
-                    self.forward.replace(new_iter);
-                    if self.backward.is_some() {
-                        return self.check_collision::<true>(entry);
-                    }
+                if self.backward.is_none() {
                     return Some(entry);
                 }
+                return self.check_collision::<true>(entry);
+            }
+            // Go to the next leaf node.
+            if let Some(entry) = iter.jump(self.guard) {
+                if self.backward.is_none() {
+                    return Some(entry);
+                }
+                return self.check_collision::<true>(entry);
             }
         }
 
         None
+    }
+}
+
+impl<'t, 'g, K, V, Q, R> From<Range<'t, 'g, K, V, Q, R>> for Iter<'t, 'g, K, V>
+where
+    Q: Comparable<K> + ?Sized,
+    R: RangeBounds<Q>,
+{
+    #[inline]
+    fn from(range: Range<'t, 'g, K, V, Q, R>) -> Self {
+        Self {
+            root: range.root,
+            forward: range.forward,
+            backward: range.backward,
+            guard: range.guard,
+        }
     }
 }
 
@@ -984,9 +1275,11 @@ impl<'t, 'g, K, V, Q: ?Sized, R: RangeBounds<Q>> Range<'t, 'g, K, V, Q, R> {
     ) -> Range<'t, 'g, K, V, Q, R> {
         Range::<'t, 'g, K, V, Q, R> {
             root,
-            leaf_iter: None,
+            forward: None,
+            backward: None,
             bounds: range,
             check_upper_bound: false,
+            check_lower_bound: false,
             guard,
             query: PhantomData,
         }
@@ -1000,8 +1293,137 @@ where
     Q: Comparable<K> + ?Sized,
     R: RangeBounds<Q>,
 {
-    fn start(&mut self) -> Option<(&'g K, &'g V)> {
-        // Start iteration.
+    /// Returns the entry that the forward iterator points to.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use scc::TreeIndex;
+    ///
+    /// use sdd::Guard;
+    ///
+    /// let treeindex: TreeIndex<u64, u32> = TreeIndex::new();
+    ///
+    /// assert!(treeindex.insert_sync(1, 2).is_ok());
+    /// assert!(treeindex.insert_sync(2, 3).is_ok());
+    /// assert!(treeindex.insert_sync(4, 6).is_ok());
+    /// assert!(treeindex.insert_sync(8, 12).is_ok());
+    ///
+    /// let guard = Guard::new();
+    /// let mut range = treeindex.range(3..=4, &guard);
+    /// assert_eq!(range.next(), Some((&4, &6)));
+    /// assert_eq!(range.get(), Some((&4, &6)));
+    /// assert_eq!(range.next(), None);
+    /// assert_eq!(range.get(), None);
+    /// ```
+    #[inline]
+    pub fn get(&self) -> Option<(&'g K, &'g V)> {
+        self.forward.as_ref().and_then(|iter| {
+            if let Some(entry) = iter.get() {
+                if !self.check_upper_bound || self.check_upper_bound(entry.0) {
+                    return Some(entry);
+                }
+            }
+            None
+        })
+    }
+
+    /// Returns the entry that the backward iterator points to.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use scc::TreeIndex;
+    ///
+    /// use sdd::Guard;
+    ///
+    /// let treeindex: TreeIndex<u64, u32> = TreeIndex::new();
+    ///
+    /// assert!(treeindex.insert_sync(1, 2).is_ok());
+    /// assert!(treeindex.insert_sync(2, 3).is_ok());
+    /// assert!(treeindex.insert_sync(4, 6).is_ok());
+    /// assert!(treeindex.insert_sync(8, 12).is_ok());
+    ///
+    /// let guard = Guard::new();
+    /// let mut range = treeindex.range(3..=4, &guard);
+    /// assert_eq!(range.next_back(), Some((&4, &6)));
+    /// assert_eq!(range.get_back(), Some((&4, &6)));
+    /// assert_eq!(range.next_back(), None);
+    /// assert_eq!(range.get_back(), None);
+    /// ```
+    #[inline]
+    pub fn get_back(&self) -> Option<(&'g K, &'g V)> {
+        self.backward.as_ref().and_then(|rev_iter| {
+            if let Some(entry) = rev_iter.get() {
+                if !self.check_lower_bound || self.check_lower_bound(entry.0) {
+                    return Some(entry);
+                }
+            }
+            None
+        })
+    }
+
+    /// Changes the direction of the range iterator if only one end of the iterator is open.
+    ///
+    /// Returns `false` if the range iterator is already bidirectional or was exhausted.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use scc::TreeIndex;
+    ///
+    /// use sdd::Guard;
+    ///
+    /// let treeindex: TreeIndex<u64, u32> = TreeIndex::new();
+    ///
+    /// assert!(treeindex.insert_sync(1, 2).is_ok());
+    /// assert!(treeindex.insert_sync(2, 2).is_ok());
+    /// assert!(treeindex.insert_sync(3, 2).is_ok());
+    /// assert!(treeindex.insert_sync(4, 2).is_ok());
+    ///
+    /// let guard = Guard::new();
+    /// let mut range = treeindex.range(1..4, &guard);
+    ///
+    /// assert_eq!(range.next_back(), Some((&3, &2)));
+    /// assert_eq!(range.next_back(), Some((&2, &2)));
+    /// assert!(range.flip());
+    /// assert_eq!(range.next(), Some((&3, &2)));
+    /// assert!(range.flip());
+    ///
+    /// assert_eq!(range.next_back(), Some((&2, &2)));
+    /// assert_eq!(range.next(), Some((&1, &2)));
+    /// assert!(range.next().is_none());
+    /// assert!(!range.flip());
+    /// ```
+    #[inline]
+    pub fn flip(&mut self) -> bool {
+        if self.backward.is_none()
+            && self.get().is_some()
+            && let Some(forward) = self.forward.take()
+        {
+            let backward = forward.rev();
+            let min_key = backward.min_key();
+            self.backward = Some(backward);
+            self.check_upper_bound = false;
+            self.set_check_lower_bound(min_key);
+            return true;
+        }
+        if self.forward.is_none()
+            && self.get_back().is_some()
+            && let Some(backward) = self.backward.take()
+        {
+            let forward = backward.rev();
+            let max_key = forward.max_key();
+            self.forward = Some(forward);
+            self.check_lower_bound = false;
+            self.set_check_upper_bound(max_key);
+            return true;
+        }
+        self.forward.is_none() && self.backward.is_none()
+    }
+
+    /// Starts forward iteration.
+    fn start_forward(&mut self) -> Option<(&'g K, &'g V)> {
         let root_ptr = self.root.load(Acquire, self.guard);
         if let Some(root) = root_ptr.as_ref() {
             let mut leaf_iter = match self.bounds.start_bound() {
@@ -1023,13 +1445,14 @@ where
                     };
                     if check_failed {
                         if leaf_iter.next().is_none() {
-                            leaf_iter = leaf_iter.jump(self.guard)?;
+                            leaf_iter.jump(self.guard)?;
                         }
                         continue;
                     }
 
-                    self.set_check_upper_bound(&leaf_iter);
-                    self.leaf_iter.replace(leaf_iter);
+                    let max_key = leaf_iter.max_key();
+                    self.set_check_upper_bound(max_key);
+                    self.forward.replace(leaf_iter);
                     return Some((k, v));
                 }
             }
@@ -1037,51 +1460,204 @@ where
         None
     }
 
+    /// Starts backward iteration.
+    fn start_backward(&mut self) -> Option<(&'g K, &'g V)> {
+        let root_ptr = self.root.load(Acquire, self.guard);
+        if let Some(root) = root_ptr.as_ref() {
+            let mut leaf_iter = match self.bounds.end_bound() {
+                Excluded(k) | Included(k) => root
+                    .approximate::<_, false>(k, self.guard)
+                    .map(LeafIter::rev),
+                Unbounded => None,
+            };
+            if leaf_iter.is_none() {
+                if let Some(mut iter) = root.max(self.guard) {
+                    iter.next();
+                    leaf_iter.replace(iter);
+                }
+            }
+            if let Some(mut leaf_iter) = leaf_iter {
+                while let Some((k, v)) = leaf_iter.get() {
+                    let check_failed = match self.bounds.end_bound() {
+                        Excluded(key) => key.compare(k).is_le(),
+                        Included(key) => key.compare(k).is_lt(),
+                        Unbounded => false,
+                    };
+                    if check_failed {
+                        if leaf_iter.next().is_none() {
+                            leaf_iter.jump(self.guard)?;
+                        }
+                        continue;
+                    }
+                    let min_key = leaf_iter.min_key();
+                    self.set_check_lower_bound(min_key);
+                    self.backward.replace(leaf_iter);
+                    return Some((k, v));
+                }
+            }
+        }
+        None
+    }
+
+    /// Moves to the next entry without checking the bounds.
     #[inline]
-    fn next_unbounded(&mut self) -> Option<(&'g K, &'g V)> {
-        if self.leaf_iter.is_none() {
-            return self.start();
+    fn forward_unbounded(&mut self) -> Option<(&'g K, &'g V)> {
+        if self.forward.is_none() {
+            return self.start_forward();
         }
 
         // Go to the next entry.
-        if let Some(leaf_iter) = self.leaf_iter.as_mut() {
+        if let Some(leaf_iter) = self.forward.as_mut() {
             if let Some(result) = leaf_iter.next() {
                 return Some(result);
             }
             // Go to the next leaf node.
-            if let Some(new_iter) = leaf_iter.jump(self.guard) {
-                if let Some(entry) = new_iter.get() {
-                    self.set_check_upper_bound(&new_iter);
-                    self.leaf_iter.replace(new_iter);
-                    return Some(entry);
-                }
+            if let Some(entry) = leaf_iter.jump(self.guard) {
+                let max_key = leaf_iter.max_key();
+                self.set_check_upper_bound(max_key);
+                return Some(entry);
             }
         }
 
         None
     }
 
+    /// Moves to the prev entry without checking the bounds.
     #[inline]
-    fn set_check_upper_bound(&mut self, leaf_iter: &LeafIter<K, V>) {
+    fn backward_unbounded(&mut self) -> Option<(&'g K, &'g V)> {
+        if self.backward.is_none() {
+            return self.start_backward();
+        }
+
+        // Go to the next entry.
+        if let Some(leaf_iter) = self.backward.as_mut() {
+            if let Some(result) = leaf_iter.next() {
+                return Some(result);
+            }
+            // Go to the next leaf node.
+            if let Some(entry) = leaf_iter.jump(self.guard) {
+                let min_key = leaf_iter.min_key();
+                self.set_check_lower_bound(min_key);
+                return Some(entry);
+            }
+        }
+
+        None
+    }
+
+    /// Sets whether to check the upper bound.
+    #[inline]
+    fn set_check_upper_bound(&mut self, max_key: Option<&'g K>) {
         self.check_upper_bound = match self.bounds.end_bound() {
-            Excluded(key) => leaf_iter.max_key().is_some_and(|k| key.compare(k).is_le()),
-            Included(key) => leaf_iter.max_key().is_some_and(|k| key.compare(k).is_lt()),
+            Excluded(key) => max_key.is_some_and(|k| key.compare(k).is_le()),
+            Included(key) => max_key.is_some_and(|k| key.compare(k).is_lt()),
             Unbounded => false,
         };
     }
+
+    /// Sets whether to check the upper bound.
+    #[inline]
+    fn set_check_lower_bound(&mut self, min_key: Option<&'g K>) {
+        self.check_lower_bound = match self.bounds.start_bound() {
+            Excluded(key) => min_key.is_some_and(|k| key.compare(k).is_ge()),
+            Included(key) => min_key.is_some_and(|k| key.compare(k).is_gt()),
+            Unbounded => false,
+        };
+    }
+
+    /// Checks if the both ends of the iterators collide.
+    fn check_collision<const FORWARD: bool>(
+        &self,
+        entry: (&'g K, &'g V),
+    ) -> Option<(&'g K, &'g V)> {
+        let other_entry = if FORWARD {
+            self.backward.as_ref().and_then(LeafRevIter::get)
+        } else {
+            self.forward.as_ref().and_then(LeafIter::get)
+        };
+        let Some(other_entry) = other_entry else {
+            // The other iterator was exhausted.
+            return None;
+        };
+        if (FORWARD && other_entry.0 > entry.0) || (!FORWARD && other_entry.0 < entry.0) {
+            return Some(entry);
+        }
+        None
+    }
+
+    /// Checks the lower bound.
+    fn check_lower_bound(&self, k: &K) -> bool {
+        match self.bounds.start_bound() {
+            Excluded(key) => key.compare(k).is_lt(),
+            Included(key) => key.compare(k).is_le(),
+            Unbounded => true,
+        }
+    }
+
+    /// Checks the upper bound.
+    fn check_upper_bound(&self, k: &K) -> bool {
+        match self.bounds.end_bound() {
+            Excluded(key) => key.compare(k).is_gt(),
+            Included(key) => key.compare(k).is_ge(),
+            Unbounded => true,
+        }
+    }
 }
 
-impl<K, V, Q: ?Sized, R: RangeBounds<Q>> Debug for Range<'_, '_, K, V, Q, R> {
+impl<K, V, Q, R> Clone for Range<'_, '_, K, V, Q, R>
+where
+    K: 'static + Clone + Ord,
+    V: 'static,
+    Q: Comparable<K> + ?Sized,
+    R: Clone + RangeBounds<Q>,
+{
     #[inline]
+    fn clone(&self) -> Self {
+        Self {
+            root: self.root,
+            forward: self.forward.as_ref().map(LeafIter::clone),
+            backward: self.backward.as_ref().map(LeafRevIter::clone),
+            bounds: self.bounds.clone(),
+            check_upper_bound: self.check_upper_bound,
+            check_lower_bound: self.check_lower_bound,
+            guard: self.guard,
+            query: PhantomData,
+        }
+    }
+}
+
+impl<K, V, Q: ?Sized, R: RangeBounds<Q>> fmt::Debug for Range<'_, '_, K, V, Q, R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Range")
-            .field("root", &self.root)
-            .field("leaf_iter", &self.leaf_iter)
+            .field("forward_iter", &self.forward)
+            .field("backward_iter", &self.backward)
             .field("check_upper_bound", &self.check_upper_bound)
+            .field("check_lower_bound", &self.check_upper_bound)
             .finish()
     }
 }
 
+impl<K, V, Q, R> DoubleEndedIterator for Range<'_, '_, K, V, Q, R>
+where
+    K: 'static + Clone + Ord,
+    V: 'static,
+    Q: Comparable<K> + ?Sized,
+    R: RangeBounds<Q>,
+{
+    #[inline]
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if let Some(entry) = self.backward_unbounded() {
+            if self.check_lower_bound && !self.check_lower_bound(entry.0) {
+                return None;
+            }
+            if self.forward.is_none() {
+                return Some(entry);
+            }
+            return self.check_collision::<false>(entry);
+        }
+        None
+    }
+}
 impl<'g, K, V, Q, R> Iterator for Range<'_, 'g, K, V, Q, R>
 where
     K: 'static + Clone + Ord,
@@ -1093,26 +1669,14 @@ where
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        if let Some((k, v)) = self.next_unbounded() {
-            if self.check_upper_bound {
-                match self.bounds.end_bound() {
-                    Excluded(key) => {
-                        if key.compare(k).is_gt() {
-                            return Some((k, v));
-                        }
-                    }
-                    Included(key) => {
-                        if key.compare(k).is_ge() {
-                            return Some((k, v));
-                        }
-                    }
-                    Unbounded => {
-                        return Some((k, v));
-                    }
-                }
-            } else {
-                return Some((k, v));
+        if let Some(entry) = self.forward_unbounded() {
+            if self.check_upper_bound && !self.check_upper_bound(entry.0) {
+                return None;
             }
+            if self.backward.is_none() {
+                return Some(entry);
+            }
+            return self.check_collision::<true>(entry);
         }
         None
     }
@@ -1132,4 +1696,16 @@ where
     Q: ?Sized,
     R: RangeBounds<Q> + UnwindSafe,
 {
+}
+
+impl<K, V> fmt::Debug for Proximity<'_, '_, K, V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Exact(iter) => f.debug_tuple("Exact").field(iter).finish(),
+            Self::Between(iter) => f.debug_tuple("Between").field(iter).finish(),
+            Self::Smaller(iter) => f.debug_tuple("Smaller").field(iter).finish(),
+            Self::Larger(iter) => f.debug_tuple("Larger").field(iter).finish(),
+            Self::Empty => write!(f, "Empty"),
+        }
+    }
 }

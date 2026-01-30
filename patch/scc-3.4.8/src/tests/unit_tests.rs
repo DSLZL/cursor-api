@@ -2404,7 +2404,7 @@ mod treeindex {
     use tokio::task;
 
     use super::common::R;
-    use crate::tree_index::{Iter, Range};
+    use crate::tree_index::{Iter, Proximity, Range};
     use crate::{Comparable, Equivalent, TreeIndex};
 
     static_assertions::assert_not_impl_any!(TreeIndex<Rc<String>, Rc<String>>: Send, Sync);
@@ -2451,7 +2451,8 @@ mod treeindex {
         let guard = Guard::new();
         let mut range = tree.range("C".."Y", &guard);
         assert_eq!(range.next().unwrap().0.0, "C");
-        assert_eq!(range.next().unwrap().0.0, "X");
+        assert_eq!(range.next_back().unwrap().0.0, "X");
+        assert!(range.next_back().is_none());
         assert!(range.next().is_none());
 
         tree.remove_range_sync("C".."Y");
@@ -2723,7 +2724,7 @@ mod treeindex {
 
     #[test]
     fn double_ended_iter() {
-        let workload_size = 16384;
+        let workload_size = if cfg!(miri) { 1024 } else { 16384 };
         let tree: TreeIndex<usize, ()> = TreeIndex::default();
         for k in 0..workload_size {
             assert!(tree.insert_sync(k, ()).is_ok());
@@ -2748,6 +2749,8 @@ mod treeindex {
         }
         assert!(de_iter.next().is_none());
         assert!(de_iter.next_back().is_none());
+        assert_eq!(tree.iter(&guard).rev().count(), workload_size);
+        assert_eq!(tree.iter(&guard).rev().rev().count(), workload_size);
 
         // Only one end of the iterator was exhausted.
         for rev in [true, false] {
@@ -2759,6 +2762,7 @@ mod treeindex {
                     prev = *key;
                 }
                 assert!(de_iter.next().is_none());
+                assert!(!de_iter.flip());
             } else {
                 let mut prev = 0;
                 for (key, ()) in de_iter.by_ref() {
@@ -2766,6 +2770,71 @@ mod treeindex {
                     prev = *key;
                 }
                 assert!(de_iter.next_back().is_none());
+                assert!(!de_iter.flip());
+            }
+        }
+    }
+
+    #[test]
+    fn double_ended_range_iter() {
+        let workload_size = if cfg!(miri) { 1024 } else { 16384 };
+        let tree: TreeIndex<usize, ()> = TreeIndex::default();
+        for k in 0..workload_size {
+            assert!(tree.insert_sync(k, ()).is_ok());
+        }
+
+        let guard = Guard::new();
+        let start = workload_size / 4;
+        let end = (workload_size / 4) * 3;
+        let mut de_range = tree.range(start..end, &guard);
+        for k in 0..workload_size / 8 {
+            assert_eq!(de_range.next_back(), Some((&(end - k - 1), &())));
+        }
+        for k in 0..workload_size / 8 {
+            assert_eq!(de_range.next(), Some((&(start + k), &())));
+        }
+        for k in 0..workload_size / 8 {
+            assert_eq!(
+                de_range.next_back(),
+                Some((&(end - k - 1 - workload_size / 8), &()))
+            );
+        }
+        for k in 0..workload_size / 8 {
+            assert_eq!(
+                de_range.next(),
+                Some((&(start + k + workload_size / 8), &()))
+            );
+        }
+        assert!(de_range.next().is_none());
+        assert!(de_range.next_back().is_none());
+        assert_eq!(
+            tree.range(0..=usize::MAX, &guard).rev().count(),
+            workload_size
+        );
+        assert_eq!(
+            tree.range(..usize::MAX, &guard).rev().rev().count(),
+            workload_size
+        );
+
+        // Only one end of the iterator was exhausted.
+        for rev in [true, false] {
+            let mut de_range = tree.range(..usize::MAX, &guard);
+            if rev {
+                let mut prev = usize::MAX;
+                while let Some((key, ())) = de_range.next_back() {
+                    assert!(prev > *key);
+                    prev = *key;
+                }
+                assert!(de_range.next().is_none());
+                assert!(!de_range.flip());
+            } else {
+                let mut prev = 0;
+                for (key, ()) in de_range.by_ref() {
+                    assert!(prev == 0 || prev < *key);
+                    prev = *key;
+                }
+                assert!(de_range.next_back().is_none());
+                assert!(!de_range.flip());
             }
         }
     }
@@ -2785,6 +2854,7 @@ mod treeindex {
         );
         assert_eq!(
             tree.range("Apex".to_owned()..="Ball".to_owned(), &Guard::new())
+                .rev()
                 .count(),
             2
         );
@@ -2796,6 +2866,7 @@ mod treeindex {
         assert_eq!(tree.range(..="Z".to_owned(), &Guard::new()).count(), 4);
         assert_eq!(
             tree.range("Ape".to_owned()..="Z".to_owned(), &Guard::new())
+                .rev()
                 .count(),
             4
         );
@@ -2806,6 +2877,7 @@ mod treeindex {
         );
         assert_eq!(
             tree.range("Ace".to_owned()..="Z".to_owned(), &Guard::new())
+                .rev()
                 .count(),
             4
         );
@@ -2817,6 +2889,7 @@ mod treeindex {
         );
         assert_eq!(
             tree.range("Apex".to_owned().."Banana".to_owned(), &Guard::new())
+                .rev()
                 .count(),
             2
         );
@@ -2900,6 +2973,7 @@ mod treeindex {
                             if end_bound % 2 == 0 {
                                 let keys = tree
                                     .range(..end_bound, &Guard::new())
+                                    .rev()
                                     .map(|(k, v)| (*k, *v))
                                     .collect::<Vec<_>>();
                                 for (k, _) in keys {
@@ -3046,7 +3120,7 @@ mod treeindex {
                             let guard = Guard::new();
                             let mut range_iter = tree.range((first + 1).., &guard);
                             let entry = range_iter.next().unwrap();
-                            assert_eq!(entry, (&key_at_halfway, &key_at_halfway)); // TODO!  left: (26153, 26153) right: (26624, 26624)
+                            assert_eq!(entry, (&key_at_halfway, &key_at_halfway));
                             let entry = range_iter.next().unwrap();
                             assert_eq!(entry, (&(key_at_halfway + 1), &(key_at_halfway + 1)));
                         }
@@ -3225,6 +3299,69 @@ mod treeindex {
             for thread in threads {
                 assert!(thread.join().is_ok());
             }
+        }
+    }
+
+    #[test]
+    fn insert_locate_remove_sync() {
+        let (num_threads, range) = if cfg!(miri) { (2, 8) } else { (8, 1024) };
+        let repeat = if cfg!(miri) { 4 } else { 512 };
+        let offset = 7;
+        let tree: Arc<TreeIndex<usize, usize>> = Arc::new(TreeIndex::new());
+
+        for t in 0..num_threads {
+            // Fixed points.
+            assert!(
+                tree.insert_sync(offset + t * range, offset + t * range)
+                    .is_ok()
+            );
+        }
+
+        let barrier = Arc::new(Barrier::new(num_threads));
+        let mut threads = Vec::with_capacity(num_threads);
+        for t in 0..num_threads {
+            let (tree, barrier) = (tree.clone(), barrier.clone());
+            threads.push(thread::spawn(move || {
+                let first = offset + t * range;
+                barrier.wait();
+                for _ in 0..repeat {
+                    let guard = Guard::new();
+                    for k in (first + 1)..(first + range) {
+                        assert!(tree.insert_sync(k, k).is_ok());
+                    }
+                    let Proximity::Exact(iter) = tree.locate(&first, &guard) else {
+                        unreachable!("{:?}", tree.locate(&first, &guard));
+                    };
+                    assert_eq!(iter.get(), Some((&first, &first)));
+
+                    for key in (first + 1)..(first + range) {
+                        assert!(tree.remove_sync(&key));
+                        assert!(!tree.remove_sync(&key));
+                        assert!(tree.peek_with(&(first + 1), |_, _| ()).is_none());
+                        assert!(tree.peek_with(&key, |_, _| ()).is_none());
+
+                        if key != first + range - 1 {
+                            let Proximity::Between(iter) = tree.locate(&key, &guard) else {
+                                unreachable!();
+                            };
+                            assert_eq!(iter.get(), Some((&first, &first)));
+                            assert_eq!(iter.get_back(), Some((&(key + 1), &(key + 1))));
+                        }
+                    }
+                    let Proximity::Smaller(iter) = tree.locate(&usize::MAX, &guard) else {
+                        unreachable!();
+                    };
+                    assert!(*iter.get_back().unwrap().0 <= offset + num_threads * range);
+
+                    let Proximity::Larger(iter) = tree.locate(&0, &guard) else {
+                        unreachable!();
+                    };
+                    assert_eq!(*iter.get().unwrap().0, offset);
+                }
+            }));
+        }
+        for thread in threads {
+            assert!(thread.join().is_ok());
         }
     }
 
