@@ -8,7 +8,7 @@ use futures_core::Stream;
 use reqwest::{DataStream, Decoder};
 use tokio::sync::mpsc::{Sender, error::SendError};
 
-type BoxError = Box<dyn std::error::Error + Send + Sync>;
+type BoxError = Box<dyn ::core::error::Error + Send + Sync>;
 
 pub struct SessionStream(DataStream<Decoder>);
 

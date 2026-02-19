@@ -5,9 +5,11 @@ use std::ptr::NonNull;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{Acquire, Relaxed};
 
-use sdd::{AtomicShared, Guard, Tag};
+use sdd::{AtomicShared, Tag};
 
-use super::bucket::{BUCKET_LEN, Bucket, DataBlock, INDEX, LruList};
+use super::bucket::{BUCKET_LEN, Bucket, INDEX, LruList};
+use crate::Guard;
+use crate::data_block::DataBlock;
 use crate::exit_guard::ExitGuard;
 
 /// [`BucketArray`] is a special purpose array to manage [`Bucket`] and [`DataBlock`].

@@ -82,14 +82,14 @@ pub async fn handle_add_tokens(
         .tokens()
         .iter()
         .flatten()
-        .map(|info| info.bundle.primary_token.as_str())
+        .map(|info| info.bundle.primary_token.raw())
         .collect();
 
     // 处理新的tokens
     let mut new_tokens = Vec::with_capacity(request.tokens.len());
     for token_info in request.tokens {
-        if !existing_tokens.contains(token_info.token.as_str())
-            && let Ok(raw) = <RawToken as ::core::str::FromStr>::from_str(&token_info.token)
+        if let Ok(raw) = <RawToken as ::core::str::FromStr>::from_str(&token_info.token)
+            && !existing_tokens.contains(&raw)
         {
             new_tokens.push((
                 TokenInfo {

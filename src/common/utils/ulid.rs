@@ -24,7 +24,7 @@ impl fmt::Display for DecodeError {
     }
 }
 
-impl std::error::Error for DecodeError {}
+impl ::core::error::Error for DecodeError {}
 
 #[inline]
 pub fn from_bytes(encoded: &[u8; ULID_LEN]) -> Result<u128, DecodeError> {

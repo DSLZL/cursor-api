@@ -224,6 +224,7 @@ impl StreamDecoder {
             let arg = if self.buffer.is_empty() {
                 format_args!("为空")
             } else {
+                __cold_path!();
                 format_args!(": {}", hex::encode(&self.buffer))
             };
             crate::debug!("数据长度小于5字节，当前数据{arg}");
@@ -317,8 +318,8 @@ impl StreamDecoder {
         raw_msg: RawMessage<'_>,
         ctx: &mut Context,
     ) -> Result<Option<StreamMessage>, CursorError> {
-        let is_compressed = raw_msg.r#type & 1 != 0;
-        let t = raw_msg.r#type >> 1;
+        let is_compressed = raw_msg.r#type & 0b01 != 0;
+        let is_protobuf = raw_msg.r#type & 0b10 == 0;
         let msg_data = if is_compressed {
             match decompress_gzip(raw_msg.data) {
                 Some(data) => Cow::Owned(data),
@@ -328,17 +329,11 @@ impl StreamDecoder {
             Cow::Borrowed(raw_msg.data)
         };
         let msg_data = &*msg_data;
-        let r = match t {
-            0 => Ok(Self::handle_text_message(msg_data, ctx)),
-            1 => Self::handle_json_message(msg_data),
-            _ => {
-                eprintln!("收到未知消息类型: {}，请尝试联系开发者以获取支持", raw_msg.r#type);
-                crate::debug!("消息类型: {}，消息内容: {}", raw_msg.r#type, hex::encode(msg_data));
-                Ok(None)
-            }
-        };
-        // crate::debug!("{} {r:?}", ctx.counter);
-        r
+        if is_protobuf {
+            Ok(Self::handle_text_message(msg_data, ctx))
+        } else {
+            Self::handle_json_message(msg_data)
+        }
     }
 
     fn handle_text_message(msg_data: &[u8], ctx: &mut Context) -> Option<StreamMessage> {

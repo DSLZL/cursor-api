@@ -2,7 +2,7 @@ use crate::{
     AppConfig,
     app::{
         lazy::KEY_PREFIX,
-        model::{Randomness, RawToken, Subject, TokenDuration, UserId, dynamic_key},
+        model::{Randomness, RawToken, SessionId, Subject, TokenDuration, UserId, dynamic_key},
     },
     common::utils::from_base64,
 };
@@ -42,6 +42,7 @@ impl configured_key::token_info::Token {
             start: raw.duration.start,
             end: raw.duration.end,
             is_session: raw.is_session,
+            workos_session_id: raw.workos_session_id.to_bytes(),
         }
     }
 
@@ -56,6 +57,7 @@ impl configured_key::token_info::Token {
             signature: self.signature,
             duration: TokenDuration { start: self.start, end: self.end },
             is_session: self.is_session,
+            workos_session_id: SessionId::from_bytes(self.workos_session_id),
         };
         if dynamic_key::get_hash(&raw) != hash {
             return None;
@@ -102,10 +104,10 @@ impl KeyConfigBuilder {
             self;
         KeyConfig {
             usage_check_models,
-            disable_vision: disable_vision
-                .unwrap_or_else(|| AppConfig::vision_ability().is_none()),
+            disable_vision: disable_vision.unwrap_or_else(|| AppConfig::vision_ability().is_none()),
             enable_slow_pool: enable_slow_pool.unwrap_or_else(AppConfig::is_slow_pool_enabled),
-            include_web_references: include_web_references.unwrap_or_else(AppConfig::is_web_references_included),
+            include_web_references: include_web_references
+                .unwrap_or_else(AppConfig::is_web_references_included),
         }
     }
 }

@@ -182,8 +182,8 @@ impl core::fmt::Display for FrontendError {
     }
 }
 
-impl std::error::Error for FrontendError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl ::core::error::Error for FrontendError {
+    fn source(&self) -> Option<&(dyn ::core::error::Error + 'static)> {
         match self {
             Self::InvalidJson { source, .. } => Some(source),
             Self::IoError(e) => Some(e),

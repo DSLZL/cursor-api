@@ -14,10 +14,10 @@ use std::panic::UnwindSafe;
 use std::pin::pin;
 use std::sync::atomic::Ordering::{AcqRel, Acquire};
 
-use sdd::{AtomicShared, Guard, Ptr, Shared, Tag};
+use sdd::{AtomicShared, Ptr, Shared, Tag};
 
-use crate::Comparable;
 use crate::async_helper::AsyncPager;
+use crate::{Comparable, Guard};
 use leaf::Iter as LeafIter;
 use leaf::RevIter as LeafRevIter;
 use leaf::{InsertResult, Leaf, RemoveResult};
@@ -213,7 +213,7 @@ where
                     match root.insert(key, val, &mut pinned_pager, &guard) {
                         Ok(r) => match r {
                             InsertResult::Success => return Ok(()),
-                            InsertResult::Duplicate(k, v) | InsertResult::Frozen(k, v) => {
+                            InsertResult::Duplicate(k, v) => {
                                 return Err((k, v));
                             }
                             InsertResult::Full(k, v) => {
@@ -233,7 +233,7 @@ where
                     (Some(Shared::new_with(Node::new_leaf_node)), Tag::None),
                     AcqRel,
                     Acquire,
-                    &Guard::new(),
+                    &guard,
                 ) {
                     unsafe {
                         let _: bool = new_node.drop_in_place();
@@ -271,7 +271,7 @@ where
                 match root.insert(key, val, &mut (), &guard) {
                     Ok(r) => match r {
                         InsertResult::Success => return Ok(()),
-                        InsertResult::Duplicate(k, v) | InsertResult::Frozen(k, v) => {
+                        InsertResult::Duplicate(k, v) => {
                             return Err((k, v));
                         }
                         InsertResult::Full(k, v) => {
@@ -290,7 +290,7 @@ where
                 (Some(Shared::new_with(Node::new_leaf_node)), Tag::None),
                 AcqRel,
                 Acquire,
-                &Guard::new(),
+                &guard,
             ) {
                 unsafe {
                     let _: bool = new_node.drop_in_place();
@@ -579,14 +579,19 @@ where
     /// Returns `None` if the key does not exist. The returned reference can survive as long as the
     /// associated [`Guard`] is alive.
     ///
+    /// # Note
+    ///
+    /// The returned reference may point to an old snapshot of the value if the leaf containing the
+    /// entry has recently been split. This means that the effects of interior mutability, e.g.,
+    /// `Mutex<T>` or `UnsafeCell<T>`, may not be observable later. Use [`TreeIndex::read_async`] or
+    /// [`TreeIndex::read_sync`] if the value needs to be updated through interior mutability.
+    ///
     /// # Examples
     ///
     /// ```
     /// use std::sync::Arc;
     ///
-    /// use scc::TreeIndex;
-    ///
-    /// use sdd::Guard;
+    /// use scc::{Guard, TreeIndex};
     ///
     /// let treeindex: TreeIndex<Arc<str>, u32> = TreeIndex::new();
     ///
@@ -610,10 +615,19 @@ where
     ///
     /// Returns `None` if the key does not exist.
     ///
+    /// # Note
+    ///
+    /// The reference passed to the closure may point to an old snapshot of the value if the leaf
+    /// containing the entry has recently been split. This means that the effects of interior
+    /// mutability, e.g., `Mutex<T>` or `UnsafeCell<T>`, may not be observable later. Use
+    /// [`TreeIndex::read_async`] or [`TreeIndex::read_sync`] if the value needs to be updated
+    /// through interior mutability.
+    ///
     /// # Examples
     ///
     /// ```
     /// use std::sync::Arc;
+    ///
     /// use scc::TreeIndex;
     ///
     /// let treeindex: TreeIndex<Arc<str>, u32> = TreeIndex::new();
@@ -640,14 +654,19 @@ where
     /// Returns `None` if the key does not exist. The returned reference can survive as long as the
     /// associated [`Guard`] is alive.
     ///
+    /// # Note
+    ///
+    /// The returned reference may point to an old snapshot of the value if the leaf containing the
+    /// entry has recently been split. This means that the effects of interior mutability, e.g.,
+    /// `Mutex<T>` or `UnsafeCell<T>`, may not be observable later. Use [`TreeIndex::read_async`] or
+    /// [`TreeIndex::read_sync`] if the value needs to be updated through interior mutability.
+    ///
     /// # Examples
     ///
     /// ```
     /// use std::sync::Arc;
     ///
-    /// use scc::TreeIndex;
-    ///
-    /// use sdd::Guard;
+    /// use scc::{Guard, TreeIndex};
     ///
     /// let treeindex: TreeIndex<Arc<str>, u32> = TreeIndex::new();
     ///
@@ -670,6 +689,90 @@ where
             return root.search_entry(key, guard);
         }
         None
+    }
+
+    /// Reads a key-value pair.
+    ///
+    /// Returns `None` if the key does not exist.
+    ///
+    /// # Note
+    ///
+    /// This method guarantees that the closure reads the latest snapshot of the value by acquiring
+    /// a shared lock on the leaf node. If lock-free read-only access to entry is required, consider
+    /// using [`TreeIndex::peek`], [`TreeIndex::peek_with`], or [`TreeIndex::peek_entry`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use scc::TreeIndex;
+    ///
+    /// let treeindex: TreeIndex<u64, u32> = TreeIndex::new();
+    /// let future_insert = treeindex.insert_async(11, 17);
+    /// let future_read = treeindex.read_async(&11, |_, v| *v);
+    /// ```
+    #[inline]
+    pub async fn read_async<Q, R, F: FnOnce(&K, &V) -> R>(
+        &self,
+        key: &Q,
+        mut reader: F,
+    ) -> Option<R>
+    where
+        Q: Comparable<K> + ?Sized,
+    {
+        let mut pinned_pager = pin!(AsyncPager::default());
+        loop {
+            {
+                let guard = Guard::new();
+                if let Some(root) = self.root.load(Acquire, &guard).as_ref() {
+                    match root.read_entry(key, reader, &mut pinned_pager, &guard) {
+                        Ok(r) => return r,
+                        Err(f) => reader = f,
+                    }
+                } else {
+                    return None;
+                }
+            }
+            pinned_pager.wait().await;
+        }
+    }
+
+    /// Reads a key-value pair.
+    ///
+    /// Returns `None` if the key does not exist.
+    ///
+    /// # Note
+    ///
+    /// This method guarantees that the closure reads the latest snapshot of the value by acquiring
+    /// a shared lock on the leaf node. If lock-free read-only access to entry is required, consider
+    /// using [`TreeIndex::peek`], [`TreeIndex::peek_with`], or [`TreeIndex::peek_entry`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use scc::TreeIndex;
+    ///
+    /// let treeindex: TreeIndex<u64, u32> = TreeIndex::new();
+    ///
+    /// assert!(treeindex.read_sync(&1, |_, v| *v).is_none());
+    /// assert!(treeindex.insert_sync(1, 10).is_ok());
+    /// assert_eq!(treeindex.read_sync(&1, |_, v| *v).unwrap(), 10);
+    /// ```
+    #[inline]
+    pub fn read_sync<Q, R, F: FnOnce(&K, &V) -> R>(&self, key: &Q, mut reader: F) -> Option<R>
+    where
+        Q: Comparable<K> + ?Sized,
+    {
+        loop {
+            let guard = Guard::new();
+            if let Some(root) = self.root.load(Acquire, &guard).as_ref() {
+                match root.read_entry(key, reader, &mut (), &guard) {
+                    Ok(r) => return r,
+                    Err(f) => reader = f,
+                }
+            } else {
+                return None;
+            }
+        }
     }
 
     /// Returns `true` if the [`TreeIndex`] contains the key.
@@ -738,9 +841,7 @@ where
     /// # Examples
     ///
     /// ```
-    /// use scc::TreeIndex;
-    ///
-    /// use sdd::Guard;
+    /// use scc::{Guard, TreeIndex};
     ///
     /// let treeindex: TreeIndex<u64, u32> = TreeIndex::new();
     ///
@@ -768,9 +869,7 @@ where
     /// # Examples
     ///
     /// ```
-    /// use scc::TreeIndex;
-    ///
-    /// use sdd::Guard;
+    /// use scc::{Guard, TreeIndex};
     ///
     /// let treeindex: TreeIndex<u64, u32> = TreeIndex::new();
     ///
@@ -795,10 +894,8 @@ where
     /// # Examples
     ///
     /// ```
-    /// use scc::TreeIndex;
+    /// use scc::{Guard, TreeIndex};
     /// use scc::tree_index::Proximity;
-    ///
-    /// use sdd::Guard;
     ///
     /// let treeindex: TreeIndex<u64, u32> = TreeIndex::new();
     ///
@@ -866,8 +963,8 @@ where
                         });
                     }
                     prev_iter = iter.clone();
-                    if iter.next().is_none() {
-                        iter.jump(guard);
+                    if iter.next().is_none() && iter.jump(guard).is_none() {
+                        break;
                     }
                 }
                 // No keys larger than or equal to the specified one found.
@@ -904,8 +1001,8 @@ where
                         });
                     }
                     prev_rev_iter = rev_iter.clone();
-                    if rev_iter.next().is_none() {
-                        rev_iter.jump(guard);
+                    if rev_iter.next().is_none() && rev_iter.jump(guard).is_none() {
+                        break;
                     }
                 }
                 // No keys smaller than or equal to the specified one found.
@@ -991,9 +1088,7 @@ impl<'t, 'g, K, V> Iter<'t, 'g, K, V> {
     /// # Examples
     ///
     /// ```
-    /// use scc::TreeIndex;
-    ///
-    /// use sdd::Guard;
+    /// use scc::{Guard, TreeIndex};
     ///
     /// let treeindex: TreeIndex<u64, u32> = TreeIndex::new();
     ///
@@ -1021,9 +1116,7 @@ impl<'t, 'g, K, V> Iter<'t, 'g, K, V> {
     /// # Examples
     ///
     /// ```
-    /// use scc::TreeIndex;
-    ///
-    /// use sdd::Guard;
+    /// use scc::{Guard, TreeIndex};
     ///
     /// let treeindex: TreeIndex<u64, u32> = TreeIndex::new();
     ///
@@ -1053,9 +1146,7 @@ impl<'t, 'g, K, V> Iter<'t, 'g, K, V> {
     /// # Examples
     ///
     /// ```
-    /// use scc::TreeIndex;
-    ///
-    /// use sdd::Guard;
+    /// use scc::{Guard, TreeIndex};
     ///
     /// let treeindex: TreeIndex<u64, u32> = TreeIndex::new();
     ///
@@ -1166,13 +1257,9 @@ where
     fn next_back(&mut self) -> Option<Self::Item> {
         // Start iteration.
         if self.backward.is_none() {
-            let root_ptr = self.root.load(Acquire, self.guard);
-            if let Some(root) = root_ptr.as_ref() {
-                if let Some(rev_iter) = root.max(self.guard) {
-                    self.backward.replace(rev_iter);
-                }
-            } else {
-                return None;
+            let root = self.root.load(Acquire, self.guard).as_ref()?;
+            if let Some(rev_iter) = root.max(self.guard) {
+                self.backward.replace(rev_iter);
             }
         }
 
@@ -1191,6 +1278,9 @@ where
                 }
                 return self.check_collision::<false>(entry);
             }
+
+            // Fuse the iterator.
+            rev_iter.rewind();
         }
 
         None
@@ -1208,13 +1298,9 @@ where
     fn next(&mut self) -> Option<Self::Item> {
         // Start iteration.
         if self.forward.is_none() {
-            let root_ptr = self.root.load(Acquire, self.guard);
-            if let Some(root) = root_ptr.as_ref() {
-                if let Some(iter) = root.min(self.guard) {
-                    self.forward.replace(iter);
-                }
-            } else {
-                return None;
+            let root = self.root.load(Acquire, self.guard).as_ref()?;
+            if let Some(iter) = root.min(self.guard) {
+                self.forward.replace(iter);
             }
         }
 
@@ -1233,6 +1319,9 @@ where
                 }
                 return self.check_collision::<true>(entry);
             }
+
+            // Fuse the iterator.
+            iter.rewind();
         }
 
         None
@@ -1296,9 +1385,7 @@ where
     /// # Examples
     ///
     /// ```
-    /// use scc::TreeIndex;
-    ///
-    /// use sdd::Guard;
+    /// use scc::{Guard, TreeIndex};
     ///
     /// let treeindex: TreeIndex<u64, u32> = TreeIndex::new();
     ///
@@ -1331,9 +1418,7 @@ where
     /// # Examples
     ///
     /// ```
-    /// use scc::TreeIndex;
-    ///
-    /// use sdd::Guard;
+    /// use scc::{Guard, TreeIndex};
     ///
     /// let treeindex: TreeIndex<u64, u32> = TreeIndex::new();
     ///
@@ -1368,9 +1453,7 @@ where
     /// # Examples
     ///
     /// ```
-    /// use scc::TreeIndex;
-    ///
-    /// use sdd::Guard;
+    /// use scc::{Guard, TreeIndex};
     ///
     /// let treeindex: TreeIndex<u64, u32> = TreeIndex::new();
     ///
@@ -1422,78 +1505,74 @@ where
 
     /// Starts forward iteration.
     fn start_forward(&mut self) -> Option<(&'g K, &'g V)> {
-        let root_ptr = self.root.load(Acquire, self.guard);
-        if let Some(root) = root_ptr.as_ref() {
-            let mut leaf_iter = match self.bounds.start_bound() {
-                Excluded(k) | Included(k) => root.approximate::<_, true>(k, self.guard),
-                Unbounded => None,
-            };
-            if leaf_iter.is_none() {
-                if let Some(mut iter) = root.min(self.guard) {
-                    iter.next();
-                    leaf_iter.replace(iter);
-                }
-            }
-            if let Some(mut leaf_iter) = leaf_iter {
-                while let Some((k, v)) = leaf_iter.get() {
-                    let check_failed = match self.bounds.start_bound() {
-                        Excluded(key) => key.compare(k).is_ge(),
-                        Included(key) => key.compare(k).is_gt(),
-                        Unbounded => false,
-                    };
-                    if check_failed {
-                        if leaf_iter.next().is_none() {
-                            leaf_iter.jump(self.guard)?;
-                        }
-                        continue;
-                    }
-
-                    let max_key = leaf_iter.max_key();
-                    self.set_check_upper_bound(max_key);
-                    self.forward.replace(leaf_iter);
-                    return Some((k, v));
-                }
+        let root = self.root.load(Acquire, self.guard).as_ref()?;
+        let mut leaf_iter = match self.bounds.start_bound() {
+            Excluded(k) | Included(k) => root.approximate::<_, true>(k, self.guard),
+            Unbounded => None,
+        };
+        if leaf_iter.is_none() {
+            if let Some(mut iter) = root.min(self.guard) {
+                iter.next();
+                leaf_iter.replace(iter);
             }
         }
+        let mut leaf_iter = leaf_iter?;
+        while let Some((k, v)) = leaf_iter.get() {
+            let check_failed = match self.bounds.start_bound() {
+                Excluded(key) => key.compare(k).is_ge(),
+                Included(key) => key.compare(k).is_gt(),
+                Unbounded => false,
+            };
+            if check_failed {
+                if leaf_iter.next().is_none() {
+                    leaf_iter.jump(self.guard)?;
+                }
+                continue;
+            }
+
+            let max_key = leaf_iter.max_key();
+            self.set_check_upper_bound(max_key);
+            self.forward.replace(leaf_iter);
+            return Some((k, v));
+        }
+
         None
     }
 
     /// Starts backward iteration.
     fn start_backward(&mut self) -> Option<(&'g K, &'g V)> {
-        let root_ptr = self.root.load(Acquire, self.guard);
-        if let Some(root) = root_ptr.as_ref() {
-            let mut leaf_iter = match self.bounds.end_bound() {
-                Excluded(k) | Included(k) => root
-                    .approximate::<_, false>(k, self.guard)
-                    .map(LeafIter::rev),
-                Unbounded => None,
-            };
-            if leaf_iter.is_none() {
-                if let Some(mut iter) = root.max(self.guard) {
-                    iter.next();
-                    leaf_iter.replace(iter);
-                }
-            }
-            if let Some(mut leaf_iter) = leaf_iter {
-                while let Some((k, v)) = leaf_iter.get() {
-                    let check_failed = match self.bounds.end_bound() {
-                        Excluded(key) => key.compare(k).is_le(),
-                        Included(key) => key.compare(k).is_lt(),
-                        Unbounded => false,
-                    };
-                    if check_failed {
-                        if leaf_iter.next().is_none() {
-                            leaf_iter.jump(self.guard)?;
-                        }
-                        continue;
-                    }
-                    let min_key = leaf_iter.min_key();
-                    self.set_check_lower_bound(min_key);
-                    self.backward.replace(leaf_iter);
-                    return Some((k, v));
-                }
+        let root = self.root.load(Acquire, self.guard).as_ref()?;
+        let mut leaf_iter = match self.bounds.end_bound() {
+            Excluded(k) | Included(k) => root
+                .approximate::<_, false>(k, self.guard)
+                .map(LeafIter::rev),
+            Unbounded => None,
+        };
+        if leaf_iter.is_none() {
+            if let Some(mut iter) = root.max(self.guard) {
+                iter.next();
+                leaf_iter.replace(iter);
             }
         }
+        let mut leaf_iter = leaf_iter?;
+        while let Some((k, v)) = leaf_iter.get() {
+            let check_failed = match self.bounds.end_bound() {
+                Excluded(key) => key.compare(k).is_le(),
+                Included(key) => key.compare(k).is_lt(),
+                Unbounded => false,
+            };
+            if check_failed {
+                if leaf_iter.next().is_none() {
+                    leaf_iter.jump(self.guard)?;
+                }
+                continue;
+            }
+            let min_key = leaf_iter.min_key();
+            self.set_check_lower_bound(min_key);
+            self.backward.replace(leaf_iter);
+            return Some((k, v));
+        }
+
         None
     }
 
@@ -1515,6 +1594,9 @@ where
                 self.set_check_upper_bound(max_key);
                 return Some(entry);
             }
+
+            // Fuse the iterator.
+            leaf_iter.rewind();
         }
 
         None
@@ -1538,6 +1620,9 @@ where
                 self.set_check_lower_bound(min_key);
                 return Some(entry);
             }
+
+            // Fuse the iterator.
+            leaf_iter.rewind();
         }
 
         None

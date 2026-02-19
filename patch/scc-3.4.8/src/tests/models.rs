@@ -1,4 +1,3 @@
-use sdd::Guard;
 use std::borrow::Borrow;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::Relaxed;
@@ -8,7 +7,7 @@ use fnv::FnvBuildHasher;
 use loom::model::Builder;
 use loom::thread::{spawn, yield_now};
 
-use crate::{HashIndex, HashMap, TreeIndex};
+use crate::{Guard, HashIndex, HashMap, TreeIndex};
 
 #[derive(Debug)]
 struct A(usize, Arc<AtomicUsize>);
@@ -252,7 +251,7 @@ fn tree_index_split_leaf_node() {
 fn tree_index_split_internal_node() {
     let _guard = SERIALIZER.lock().unwrap();
 
-    let keys = 365;
+    let keys = 365; // `13 * 14 + 14` + 1 will trigger an internal node split.
     let key_to_remove = 0;
     let mut model_builder_new_internal_node = Builder::new();
     model_builder_new_internal_node.max_branches = 1_048_576 * 16;

@@ -12,7 +12,7 @@ use reqwest::{DataStream, Decoder};
 use tokio::sync::mpsc;
 
 type HashMap<K, V> = hashbrown::HashMap<K, V, ahash::RandomState>;
-type BoxError = Box<dyn std::error::Error + Send + Sync>;
+type BoxError = Box<dyn ::core::error::Error + Send + Sync>;
 type SessionTx = mpsc::Sender<ToolResultBlockParam>;
 
 pub struct Session {

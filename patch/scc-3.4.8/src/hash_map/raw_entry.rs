@@ -16,6 +16,10 @@ where
     K: Eq + Hash,
     S: BuildHasher,
 {
+    /// Creates a raw-entry builder for advanced hash-based entry operations.
+    ///
+    /// Methods ending with `_hashed_nocheck` trust the caller-provided hash.
+    /// Prefer using [`RawEntryBuilder::hash`] to compute the hash value.
     #[inline]
     pub fn raw_entry(&self) -> RawEntryBuilder<'_, K, V, S> { RawEntryBuilder { map: self } }
 }
@@ -30,6 +34,9 @@ where S: BuildHasher
 impl<'a, K, V, S> RawEntryBuilder<'a, K, V, S>
 where S: BuildHasher
 {
+    /// Computes a key hash using the map's build hasher.
+    ///
+    /// This is intended to be paired with `_hashed_nocheck` methods.
     #[inline]
     pub fn hash<Q>(&self, k: &Q) -> u64
     where Q: Hash + ?Sized {
@@ -69,7 +76,12 @@ where S: BuildHasher
         self.try_from_key_hashed_nocheck(hash, k)
     }
 
-    /// Access an entry by a pre-computed hash and a key.
+    /// Accesses an entry by a pre-computed hash and key.
+    ///
+    /// # Contract
+    ///
+    /// `hash` must be computed for `k` with [`Self::hash`] (or an equivalent
+    /// hasher state), otherwise behavior is logically unspecified.
     #[inline]
     pub async fn from_key_hashed_nocheck_async<Q>(self, hash: u64, k: &Q) -> RawEntry<'a, K, V, S>
     where
@@ -85,7 +97,12 @@ where S: BuildHasher
         }
     }
 
-    /// Access an entry by a pre-computed hash and a key.
+    /// Accesses an entry by a pre-computed hash and key.
+    ///
+    /// # Contract
+    ///
+    /// `hash` must be computed for `k` with [`Self::hash`] (or an equivalent
+    /// hasher state), otherwise behavior is logically unspecified.
     #[inline]
     pub fn from_key_hashed_nocheck_sync<Q>(self, hash: u64, k: &Q) -> RawEntry<'a, K, V, S>
     where
@@ -101,7 +118,14 @@ where S: BuildHasher
         }
     }
 
-    /// Access an entry by a pre-computed hash and a key.
+    /// Tries to access an entry by a pre-computed hash and key.
+    ///
+    /// Returns `None` if the target bucket cannot be locked.
+    ///
+    /// # Contract
+    ///
+    /// `hash` must be computed for `k` with [`Self::hash`] (or an equivalent
+    /// hasher state), otherwise behavior is logically unspecified.
     #[inline]
     pub fn try_from_key_hashed_nocheck<Q>(self, hash: u64, k: &Q) -> Option<RawEntry<'a, K, V, S>>
     where
@@ -230,7 +254,7 @@ where
 
     #[inline]
     #[must_use]
-    pub fn get_mut(&mut self) -> &mut V { &mut self.locked_bucket.entry_mut(&mut self.entry_ptr).1 }
+    pub fn get_mut(&mut self) -> &mut V { self.locked_bucket.entry_mut(&mut self.entry_ptr).1 }
 
     #[inline]
     #[must_use]
@@ -312,12 +336,22 @@ where
     K: Eq + Hash,
     S: BuildHasher,
 {
+    /// Inserts an entry by hashing `key` with the map hasher.
+    ///
+    /// This method is kept for compatibility.
+    #[deprecated = "Use insert_hashed_nocheck to keep hash/key pairing explicit."]
     #[inline]
     pub fn insert(self, key: K, value: V) {
         let hash = self.hashmap.hash(&key);
         self.insert_hashed_nocheck(hash, key, value)
     }
 
+    /// Inserts an entry using a caller-supplied hash.
+    ///
+    /// # Contract
+    ///
+    /// `hash` must be computed for `key` with [`RawEntryBuilder::hash`] (or an
+    /// equivalent hasher state), otherwise behavior is logically unspecified.
     #[inline]
     #[allow(clippy::shadow_unrelated)]
     pub fn insert_hashed_nocheck(self, hash: u64, key: K, value: V) {

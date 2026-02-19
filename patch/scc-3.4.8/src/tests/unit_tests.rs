@@ -74,9 +74,11 @@ mod hashmap {
     use super::common::{EqTest, MaybeEq, R};
     use crate::HashMap;
     use crate::async_helper::AsyncGuard;
+    use crate::data_block::DataBlock;
     use crate::hash_map::{self, Entry, ReplaceResult, Reserve};
     use crate::hash_table::bucket::{MAP, Writer};
 
+    static_assertions::assert_eq_size!(DataBlock<u8, u64, 32>, [u64; 36]);
     static_assertions::assert_eq_size!(Option<Writer<usize, usize, (), MAP>>, usize);
     static_assertions::assert_impl_all!(AsyncGuard: Send, Sync);
     static_assertions::assert_eq_size!(AsyncGuard, usize);
@@ -1077,9 +1079,9 @@ mod hashmap {
                     }
                     let mut removed = 0;
                     hashmap
-                        .iter_mut_async(|entry| {
-                            if range.contains(&entry.0) {
-                                let (k, v) = entry.consume();
+                        .iter_mut_async(|e| {
+                            if range.contains(e.key()) {
+                                let (k, v) = e.consume();
                                 assert_eq!(k, v);
                                 removed += 1;
                             }
@@ -1119,9 +1121,9 @@ mod hashmap {
                         assert!(result.is_ok());
                     }
                     let mut removed = 0;
-                    hashmap.iter_mut_sync(|entry| {
-                        if range.contains(&entry.0) {
-                            let (k, v) = entry.consume();
+                    hashmap.iter_mut_sync(|e| {
+                        if range.contains(e.key()) {
+                            let (k, v) = e.consume();
                             assert_eq!(k, v);
                             removed += 1;
                         }
@@ -1244,12 +1246,11 @@ mod hashindex {
     use futures::future::join_all;
     use proptest::strategy::{Strategy, ValueTree};
     use proptest::test_runner::TestRunner;
-    use sdd::Guard;
     use tokio::sync::Barrier as AsyncBarrier;
 
     use super::common::{EqTest, R};
-    use crate::HashIndex;
     use crate::hash_index::{self, Iter};
+    use crate::{Guard, HashIndex};
 
     static_assertions::assert_not_impl_any!(HashIndex<Rc<String>, Rc<String>>: Send, Sync);
     static_assertions::assert_not_impl_any!(hash_index::Entry<Rc<String>, Rc<String>>: Send, Sync);
@@ -1464,7 +1465,11 @@ mod hashindex {
                     }
                 } else {
                     for k in 0..num_tasks {
-                        assert!(hashindex.peek_with(&k, |_, _| ()).is_some());
+                        if k % 2 == 0 {
+                            assert!(hashindex.peek_with(&k, |_, _| ()).is_some());
+                        } else {
+                            assert!(hashindex.read_async(&k, |_, _| ()).await.is_some());
+                        }
                     }
                 }
             }));
@@ -1502,7 +1507,11 @@ mod hashindex {
                 } else if !cfg!(miri) {
                     // See notes about `Miri` in `peek*`.
                     for k in 0..num_threads {
-                        assert!(hashindex.peek_with(&k, |_, _| ()).is_some());
+                        if k % 2 == 0 {
+                            assert!(hashindex.peek_with(&k, |_, _| ()).is_some());
+                        } else {
+                            assert!(hashindex.read_sync(&k, |_, _| ()).is_some());
+                        }
                     }
                 }
             }));
@@ -2398,14 +2407,13 @@ mod treeindex {
     use proptest::prelude::*;
     use proptest::strategy::ValueTree;
     use proptest::test_runner::TestRunner;
-    use sdd::Guard;
     use sdd::suspend;
     use tokio::sync::Barrier as AsyncBarrier;
     use tokio::task;
 
     use super::common::R;
     use crate::tree_index::{Iter, Proximity, Range};
-    use crate::{Comparable, Equivalent, TreeIndex};
+    use crate::{Comparable, Equivalent, Guard, TreeIndex};
 
     static_assertions::assert_not_impl_any!(TreeIndex<Rc<String>, Rc<String>>: Send, Sync);
     static_assertions::assert_impl_all!(TreeIndex<String, String>: Send, Sync, UnwindSafe);
@@ -3221,6 +3229,124 @@ mod treeindex {
                     assert_eq!(removed_again, 0);
                     assert_eq!(found, removed, "{inserted} {found} {removed}");
                     assert_eq!(inserted, found, "{inserted} {found} {removed}");
+                }
+            }));
+        }
+        for thread in threads {
+            assert!(thread.join().is_ok());
+        }
+        assert_eq!(tree.len(), 0);
+    }
+
+    #[cfg_attr(miri, ignore)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
+    async fn insert_read_remove_async() {
+        let num_tasks = 8;
+        let tree: Arc<TreeIndex<usize, AtomicUsize>> = Arc::new(TreeIndex::new());
+        let barrier = Arc::new(AsyncBarrier::new(num_tasks));
+        let mut tasks = Vec::with_capacity(num_tasks);
+        for task_id in 0..num_tasks {
+            let tree = tree.clone();
+            let barrier = barrier.clone();
+            tasks.push(tokio::task::spawn(async move {
+                barrier.wait().await;
+                let data_size = 4096;
+                let key_start = task_id * data_size;
+                for i in 0..data_size {
+                    assert!(
+                        tree.insert_async(key_start + i, AtomicUsize::new(task_id))
+                            .await
+                            .is_ok()
+                    );
+                }
+                for i in 0..data_size {
+                    assert_eq!(
+                        tree.read_async(&(key_start + i), |_, v| {
+                            if v.load(Relaxed) == task_id {
+                                v.fetch_add(1, Relaxed) + 1
+                            } else {
+                                0
+                            }
+                        })
+                        .await,
+                        Some(task_id + 1)
+                    );
+                    assert!(
+                        tree.insert_async(
+                            key_start + i + num_tasks * data_size,
+                            AtomicUsize::new(task_id)
+                        )
+                        .await
+                        .is_ok()
+                    );
+                }
+                for i in 0..data_size {
+                    assert!(
+                        tree.remove_if_async(&(key_start + i), |v| v.load(Relaxed) == task_id + 1)
+                            .await
+                    );
+                    assert!(
+                        tree.remove_if_async(&(key_start + i + num_tasks * data_size), |v| v
+                            .load(Relaxed)
+                            == task_id)
+                            .await
+                    );
+                }
+            }));
+        }
+        for task in join_all(tasks).await {
+            assert!(task.is_ok());
+        }
+        assert_eq!(tree.len(), 0);
+    }
+
+    #[test]
+    fn insert_read_remove_sync() {
+        let num_threads = if cfg!(miri) { 2 } else { 16 };
+        let tree: Arc<TreeIndex<usize, AtomicUsize>> = Arc::new(TreeIndex::new());
+        let barrier = Arc::new(Barrier::new(num_threads));
+        let mut threads = Vec::with_capacity(num_threads);
+        for thread_id in 0..num_threads {
+            let tree = tree.clone();
+            let barrier = barrier.clone();
+            threads.push(thread::spawn(move || {
+                barrier.wait();
+                let data_size = if cfg!(miri) { 16 } else { 4096 };
+                let key_start = thread_id * data_size;
+                for i in 0..data_size {
+                    assert!(
+                        tree.insert_sync(key_start + i, AtomicUsize::new(thread_id))
+                            .is_ok()
+                    );
+                }
+                for i in 0..data_size {
+                    assert_eq!(
+                        tree.read_sync(&(key_start + i), |_, v| {
+                            if v.load(Relaxed) == thread_id {
+                                v.fetch_add(1, Relaxed) + 1
+                            } else {
+                                0
+                            }
+                        }),
+                        Some(thread_id + 1)
+                    );
+                    assert!(
+                        tree.insert_sync(
+                            key_start + i + num_threads * data_size,
+                            AtomicUsize::new(thread_id)
+                        )
+                        .is_ok()
+                    );
+                }
+                for i in 0..data_size {
+                    assert!(
+                        tree.remove_if_sync(&(key_start + i), |v| v.load(Relaxed) == thread_id + 1)
+                    );
+                    assert!(
+                        tree.remove_if_sync(&(key_start + i + num_threads * data_size), |v| v
+                            .load(Relaxed)
+                            == thread_id)
+                    );
                 }
             }));
         }

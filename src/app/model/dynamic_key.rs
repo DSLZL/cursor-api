@@ -74,7 +74,7 @@ pub fn get_hash(raw: &RawToken) -> [u8; 32] {
     let mut hmac = (**INSTANCE.get().load()).clone();
     hmac.update(b"subject");
     hmac.update(raw.subject.provider.as_str().as_bytes());
-    hmac.update(&raw.subject.id.to_bytes());
+    hmac.update(raw.subject.id.as_bytes());
     hmac.update(b"signature");
     hmac.update(&raw.signature);
     hmac.update(b"duration");
@@ -84,5 +84,7 @@ pub fn get_hash(raw: &RawToken) -> [u8; 32] {
     hmac.update(&raw.randomness.to_bytes());
     hmac.update(b"type");
     hmac.update(if raw.is_session { TYPE_SESSION } else { TYPE_WEB }.as_bytes());
+    hmac.update(b"workos\x1fsession\x1fid");
+    hmac.update(raw.workos_session_id.as_bytes());
     hmac.finalize_fixed().0
 }

@@ -1,6 +1,6 @@
 use ::core::{fmt, str::FromStr};
 use ::rand::{
-    RngCore as _,
+    Rng as _,
     distr::{Distribution, StandardUniform},
 };
 use ::sha2::Digest as _;
@@ -31,7 +31,7 @@ impl fmt::Display for HashError {
     }
 }
 
-impl std::error::Error for HashError {}
+impl ::core::error::Error for HashError {}
 
 #[derive(Clone, Copy, PartialEq, ::rkyv::Archive, ::rkyv::Serialize, ::rkyv::Deserialize)]
 #[repr(transparent)]

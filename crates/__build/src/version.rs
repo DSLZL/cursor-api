@@ -72,7 +72,7 @@ impl core::fmt::Display for ParseError {
   }
 }
 
-impl std::error::Error for ParseError {}
+impl ::core::error::Error for ParseError {}
 
 impl core::str::FromStr for Version {
   type Err = ParseError;

@@ -1,48 +1,54 @@
-use super::{
-    Body,
-    request::{Request, RequestBuilder},
-    response::Response,
-};
-#[cfg(feature = "__tls")]
-use crate::Certificate;
-#[cfg(any(feature = "__native-tls", feature = "__rustls"))]
-use crate::Identity;
-#[cfg(feature = "http3")]
-use crate::async_impl::h3_client::H3Client;
+#[cfg(any(feature = "__native-tls", feature = "__rustls",))]
+use std::any::Any;
+use std::future::Future;
+use std::net::IpAddr;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{ready, Context, Poll};
+use std::time::Duration;
+use std::{collections::HashMap, convert::TryInto, net::SocketAddr};
+use std::{fmt, str};
+
+use super::request::{Request, RequestBuilder};
+use super::response::Response;
+use super::Body;
 #[cfg(feature = "http3")]
 use crate::async_impl::h3_client::connect::{H3ClientConfig, H3Connector};
+#[cfg(feature = "http3")]
+use crate::async_impl::h3_client::H3Client;
+use crate::config::{RequestConfig, TotalTimeout};
 #[cfg(unix)]
 use crate::connect::uds::UnixSocketProvider;
 #[cfg(target_os = "windows")]
 use crate::connect::windows_named_pipe::WindowsNamedPipeProvider;
+use crate::connect::{
+    sealed::{Conn, Unnameable},
+    BoxedConnectorLayer, BoxedConnectorService, Connector, ConnectorBuilder,
+};
 #[cfg(feature = "cookies")]
 use crate::cookie;
 #[cfg(feature = "cookies")]
 use crate::cookie::service::CookieService;
 #[cfg(feature = "hickory-dns")]
 use crate::dns::hickory::HickoryDnsResolver;
+use crate::dns::{gai::GaiResolver, DnsResolverWithOverrides, DynResolver, Resolve};
+use crate::error::{self, BoxError};
+use crate::into_url::try_uri;
+use crate::proxy::Matcher as ProxyMatcher;
+use crate::redirect::{self, TowerRedirectPolicy};
 #[cfg(feature = "__rustls")]
 use crate::tls::CertificateRevocationList;
 #[cfg(feature = "__tls")]
 use crate::tls::{self, TlsBackend};
-use crate::{
-    IntoUrl, Method, Proxy, Url,
-    config::{RequestConfig, TotalTimeout},
-    connect::{
-        BoxedConnectorLayer, BoxedConnectorService, Connector, ConnectorBuilder,
-        sealed::{Conn, Unnameable},
-    },
-    dns::{DnsResolverWithOverrides, DynResolver, Resolve, gai::GaiResolver},
-    error::{self, BoxError},
-    into_url::try_uri,
-    proxy::Matcher as ProxyMatcher,
-    redirect::{self, TowerRedirectPolicy},
-};
-use http::{
-    Uri,
-    header::{Entry, HeaderMap, HeaderValue, PROXY_AUTHORIZATION, USER_AGENT},
-    uri::Scheme,
-};
+#[cfg(feature = "__tls")]
+use crate::Certificate;
+#[cfg(any(feature = "__native-tls", feature = "__rustls"))]
+use crate::Identity;
+use crate::{IntoUrl, Method, Proxy, Url};
+
+use http::header::{Entry, HeaderMap, HeaderValue, PROXY_AUTHORIZATION, USER_AGENT};
+use http::uri::Scheme;
+use http::Uri;
 use hyper_util::client::legacy::connect::HttpConnector;
 #[cfg(feature = "__native-tls")]
 use native_tls_crate::TlsConnector;
@@ -51,23 +57,15 @@ use pin_project_lite::pin_project;
 use quinn::TransportConfig;
 #[cfg(feature = "http3")]
 use quinn::VarInt;
-#[cfg(any(feature = "__native-tls", feature = "__rustls",))]
-use std::any::Any;
-use std::{
-    collections::HashMap,
-    convert::TryInto,
-    fmt,
-    future::Future,
-    net::{IpAddr, SocketAddr},
-    pin::Pin,
-    str,
-    sync::Arc,
-    task::{Context, Poll, ready},
-    time::Duration,
-};
 use tokio::time::Sleep;
-use tower::{Layer, Service, util::BoxCloneSyncServiceLayer};
-#[cfg(any(feature = "gzip", feature = "brotli", feature = "zstd", feature = "deflate"))]
+use tower::util::BoxCloneSyncServiceLayer;
+use tower::{Layer, Service};
+#[cfg(any(
+    feature = "gzip",
+    feature = "brotli",
+    feature = "zstd",
+    feature = "deflate"
+))]
 use tower_http::decompression::Decompression;
 use tower_http::follow_redirect::FollowRedirect;
 
@@ -272,7 +270,9 @@ struct Config {
 }
 
 impl Default for ClientBuilder {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ClientBuilder {
@@ -280,14 +280,14 @@ impl ClientBuilder {
     ///
     /// This is the same as `Client::builder()`.
     pub fn new() -> Self {
-        // let mut headers: HeaderMap<HeaderValue> = HeaderMap::with_capacity(2);
-        // headers.insert(http::header::ACCEPT, HeaderValue::from_static("*/*"));
+        let headers: HeaderMap<HeaderValue> = HeaderMap::with_capacity(1);
+        // headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
 
         ClientBuilder {
             config: Config {
                 error: None,
                 accepts: Accepts::default(),
-                headers: HeaderMap::with_capacity(1),
+                headers,
                 #[cfg(feature = "__tls")]
                 hostname_verification: true,
                 #[cfg(feature = "__tls")]
@@ -433,7 +433,10 @@ impl ClientBuilder {
                 resolver = dns_resolver;
             }
             if !config.dns_overrides.is_empty() {
-                resolver = Arc::new(DnsResolverWithOverrides::new(resolver, config.dns_overrides));
+                resolver = Arc::new(DnsResolverWithOverrides::new(
+                    resolver,
+                    config.dns_overrides,
+                ));
             }
             DynResolver::new(resolver)
         };
@@ -731,20 +734,20 @@ impl ClientBuilder {
                         if !config.tls_certs_only {
                             // Should this just warn? Error for now...
                             return Err(crate::error::builder(
-                                "disabling rustls hostname verification only allowed with tls_certs_only()",
+                                    "disabling rustls hostname verification only allowed with tls_certs_only()"
                             ));
                         }
 
-                        config_builder.dangerous().with_custom_certificate_verifier(Arc::new(
-                            IgnoreHostname::new(
+                        config_builder
+                            .dangerous()
+                            .with_custom_certificate_verifier(Arc::new(IgnoreHostname::new(
                                 crate::tls::rustls_store(
                                     config.root_certs,
                                     #[cfg(feature = "rustls-webpki-roots-ext")]
                                     config.webpki_roots,
                                 )?,
                                 signature_algorithms,
-                            ),
-                        ))
+                            )))
                     } else if !config.tls_certs_only {
                         // Check for some misconfigurations and report them.
                         if !config.crls.is_empty() {
@@ -789,8 +792,11 @@ impl ClientBuilder {
                                 config.webpki_roots,
                             )?)
                         } else {
-                            let crls =
-                                config.crls.iter().map(|e| e.as_rustls_crl()).collect::<Vec<_>>();
+                            let crls = config
+                                .crls
+                                .iter()
+                                .map(|e| e.as_rustls_crl())
+                                .collect::<Vec<_>>();
                             let verifier =
                                 rustls::client::WebPkiServerVerifier::builder_with_provider(
                                     Arc::new(crate::tls::rustls_store(
@@ -1008,11 +1014,14 @@ impl ClientBuilder {
         };
 
         let hyper_client = builder.build(connector_builder.build(config.connector_layers));
-        let hyper_service = HyperService { hyper: hyper_client };
+        let hyper_service = HyperService {
+            hyper: hyper_client,
+        };
 
         let redirect_policy = {
             let mut p = TowerRedirectPolicy::new(config.redirect_policy);
-            p.with_referer(config.referer).with_https_only(config.https_only);
+            p.with_referer(config.referer)
+                .with_https_only(config.https_only);
             p
         };
 
@@ -1023,7 +1032,12 @@ impl ClientBuilder {
         #[cfg(feature = "cookies")]
         let svc = CookieService::new(svc, config.cookie_store.clone());
         let hyper = FollowRedirect::with_policy(svc, redirect_policy.clone());
-        #[cfg(any(feature = "gzip", feature = "brotli", feature = "zstd", feature = "deflate"))]
+        #[cfg(any(
+            feature = "gzip",
+            feature = "brotli",
+            feature = "zstd",
+            feature = "deflate"
+        ))]
         let hyper = Decompression::new(hyper)
             // set everything to NO, in case tower-http has it enabled but
             // reqwest does not. then set to config value if cfg allows.
@@ -1481,7 +1495,9 @@ impl ClientBuilder {
     ///
     /// Default is 90 seconds.
     pub fn pool_idle_timeout<D>(mut self, val: D) -> ClientBuilder
-    where D: Into<Option<Duration>> {
+    where
+        D: Into<Option<Duration>>,
+    {
         self.config.pool_idle_timeout = val.into();
         self
     }
@@ -1509,7 +1525,8 @@ impl ClientBuilder {
         mut self,
         value: bool,
     ) -> ClientBuilder {
-        self.config.http1_allow_obsolete_multiline_headers_in_responses = value;
+        self.config
+            .http1_allow_obsolete_multiline_headers_in_responses = value;
         self
     }
 
@@ -1528,7 +1545,8 @@ impl ClientBuilder {
         mut self,
         value: bool,
     ) -> ClientBuilder {
-        self.config.http1_allow_spaces_after_header_name_in_responses = value;
+        self.config
+            .http1_allow_spaces_after_header_name_in_responses = value;
         self
     }
 
@@ -1678,7 +1696,9 @@ impl ClientBuilder {
     /// # }
     /// ```
     pub fn local_address<T>(mut self, addr: T) -> ClientBuilder
-    where T: Into<Option<IpAddr>> {
+    where
+        T: Into<Option<IpAddr>>,
+    {
         self.config.local_address = addr.into();
         self
     }
@@ -1736,7 +1756,9 @@ impl ClientBuilder {
     ///
     /// If `None`, the option will not be set.
     pub fn tcp_keepalive<D>(mut self, val: D) -> ClientBuilder
-    where D: Into<Option<Duration>> {
+    where
+        D: Into<Option<Duration>>,
+    {
         self.config.tcp_keepalive = val.into();
         self
     }
@@ -1745,7 +1767,9 @@ impl ClientBuilder {
     ///
     /// If `None`, the option will not be set.
     pub fn tcp_keepalive_interval<D>(mut self, val: D) -> ClientBuilder
-    where D: Into<Option<Duration>> {
+    where
+        D: Into<Option<Duration>>,
+    {
         self.config.tcp_keepalive_interval = val.into();
         self
     }
@@ -1754,7 +1778,9 @@ impl ClientBuilder {
     ///
     /// If `None`, the option will not be set.
     pub fn tcp_keepalive_retries<C>(mut self, retries: C) -> ClientBuilder
-    where C: Into<Option<u32>> {
+    where
+        C: Into<Option<u32>>,
+    {
         self.config.tcp_keepalive_retries = retries.into();
         self
     }
@@ -1767,7 +1793,9 @@ impl ClientBuilder {
     /// If `None`, the option will not be set.
     #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
     pub fn tcp_user_timeout<D>(mut self, val: D) -> ClientBuilder
-    where D: Into<Option<Duration>> {
+    where
+        D: Into<Option<Duration>>,
+    {
         self.config.tcp_user_timeout = val.into();
         self
     }
@@ -1865,7 +1893,7 @@ impl ClientBuilder {
         self
     }
 
-    #[allow(missing_docs)]
+    #[doc(hidden)]
     #[cfg(all(feature = "__rustls", feature = "rustls-webpki-roots-ext"))]
     pub fn webpki_roots_only(mut self) -> ClientBuilder {
         self.config.webpki_roots = true;
@@ -2107,7 +2135,9 @@ impl ClientBuilder {
 
     /// Deprecated: use [`ClientBuilder::tls_backend_native()`] instead.
     #[cfg(feature = "__native-tls")]
-    pub fn use_native_tls(self) -> ClientBuilder { self.tls_backend_native() }
+    pub fn use_native_tls(self) -> ClientBuilder {
+        self.tls_backend_native()
+    }
 
     /// Force using the Rustls TLS backend.
     ///
@@ -2127,7 +2157,9 @@ impl ClientBuilder {
     /// Deprecated: use [`ClientBuilder::tls_backend_rustls()`] instead.
     #[cfg(feature = "__rustls")]
     #[cfg_attr(docsrs, doc(cfg(feature = "rustls")))]
-    pub fn use_rustls_tls(self) -> ClientBuilder { self.tls_backend_rustls() }
+    pub fn use_rustls_tls(self) -> ClientBuilder {
+        self.tls_backend_rustls()
+    }
 
     /// Use a preconfigured TLS backend.
     ///
@@ -2264,7 +2296,9 @@ impl ClientBuilder {
     /// Set the port to `0` to use the conventional port for the given scheme (e.g. 80 for http).
     /// Ports in the URL itself will always be used instead of the port in the overridden addr.
     pub fn resolve_to_addrs(mut self, domain: &str, addrs: &[SocketAddr]) -> ClientBuilder {
-        self.config.dns_overrides.insert(domain.to_ascii_lowercase(), addrs.to_vec());
+        self.config
+            .dns_overrides
+            .insert(domain.to_ascii_lowercase(), addrs.to_vec());
         self
     }
 
@@ -2273,7 +2307,9 @@ impl ClientBuilder {
     /// Overrides for specific names passed to `resolve` and `resolve_to_addrs` will
     /// still be applied on top of this resolver.
     pub fn dns_resolver<R>(mut self, resolver: R) -> ClientBuilder
-    where R: crate::dns::resolve::IntoResolve {
+    where
+        R: crate::dns::resolve::IntoResolve,
+    {
         self.config.dns_resolver = Some(resolver.into_resolve());
         self
     }
@@ -2436,7 +2472,9 @@ impl ClientBuilder {
 type HyperClient = hyper_util::client::legacy::Client<Connector, super::Body>;
 
 impl Default for Client {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(feature = "__rustls")]
@@ -2458,54 +2496,70 @@ impl Client {
     ///
     /// Use `Client::builder()` if you wish to handle the failure as an `Error`
     /// instead of panicking.
-    pub fn new() -> Client { ClientBuilder::new().build().expect("Client::new()") }
+    pub fn new() -> Client {
+        ClientBuilder::new().build().expect("Client::new()")
+    }
 
     /// Creates a `ClientBuilder` to configure a `Client`.
     ///
     /// This is the same as `ClientBuilder::new()`.
-    pub fn builder() -> ClientBuilder { ClientBuilder::new() }
+    pub fn builder() -> ClientBuilder {
+        ClientBuilder::new()
+    }
 
     /// Convenience method to make a `GET` request to a URL.
     ///
     /// # Errors
     ///
     /// This method fails whenever the supplied `Url` cannot be parsed.
-    pub fn get<U: IntoUrl>(&self, url: U) -> RequestBuilder { self.request(Method::GET, url) }
+    pub fn get<U: IntoUrl>(&self, url: U) -> RequestBuilder {
+        self.request(Method::GET, url)
+    }
 
     /// Convenience method to make a `POST` request to a URL.
     ///
     /// # Errors
     ///
     /// This method fails whenever the supplied `Url` cannot be parsed.
-    pub fn post<U: IntoUrl>(&self, url: U) -> RequestBuilder { self.request(Method::POST, url) }
+    pub fn post<U: IntoUrl>(&self, url: U) -> RequestBuilder {
+        self.request(Method::POST, url)
+    }
 
     /// Convenience method to make a `PUT` request to a URL.
     ///
     /// # Errors
     ///
     /// This method fails whenever the supplied `Url` cannot be parsed.
-    pub fn put<U: IntoUrl>(&self, url: U) -> RequestBuilder { self.request(Method::PUT, url) }
+    pub fn put<U: IntoUrl>(&self, url: U) -> RequestBuilder {
+        self.request(Method::PUT, url)
+    }
 
     /// Convenience method to make a `PATCH` request to a URL.
     ///
     /// # Errors
     ///
     /// This method fails whenever the supplied `Url` cannot be parsed.
-    pub fn patch<U: IntoUrl>(&self, url: U) -> RequestBuilder { self.request(Method::PATCH, url) }
+    pub fn patch<U: IntoUrl>(&self, url: U) -> RequestBuilder {
+        self.request(Method::PATCH, url)
+    }
 
     /// Convenience method to make a `DELETE` request to a URL.
     ///
     /// # Errors
     ///
     /// This method fails whenever the supplied `Url` cannot be parsed.
-    pub fn delete<U: IntoUrl>(&self, url: U) -> RequestBuilder { self.request(Method::DELETE, url) }
+    pub fn delete<U: IntoUrl>(&self, url: U) -> RequestBuilder {
+        self.request(Method::DELETE, url)
+    }
 
     /// Convenience method to make a `HEAD` request to a URL.
     ///
     /// # Errors
     ///
     /// This method fails whenever the supplied `Url` cannot be parsed.
-    pub fn head<U: IntoUrl>(&self, url: U) -> RequestBuilder { self.request(Method::HEAD, url) }
+    pub fn head<U: IntoUrl>(&self, url: U) -> RequestBuilder {
+        self.request(Method::HEAD, url)
+    }
 
     /// Start building a `Request` with the `Method` and `Url`.
     ///
@@ -2568,7 +2622,10 @@ impl Client {
         self.proxy_auth(&uri, &mut headers);
         self.proxy_custom_headers(&uri, &mut headers);
 
-        let builder = hyper::Request::builder().method(method.clone()).uri(uri).version(version);
+        let builder = hyper::Request::builder()
+            .method(method.clone())
+            .uri(uri)
+            .version(version);
 
         let in_flight = match version {
             #[cfg(feature = "http3")]
@@ -2594,7 +2651,11 @@ impl Client {
             .map(tokio::time::sleep)
             .map(Box::pin);
 
-        let read_timeout_fut = self.inner.read_timeout.map(tokio::time::sleep).map(Box::pin);
+        let read_timeout_fut = self
+            .inner
+            .read_timeout
+            .map(tokio::time::sleep)
+            .map(Box::pin);
 
         Pending {
             inner: PendingInner::Request(Box::pin(PendingRequest {
@@ -2704,7 +2765,9 @@ impl tower_service::Service<Request> for Client {
         Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, req: Request) -> Self::Future { self.execute_request(req) }
+    fn call(&mut self, req: Request) -> Self::Future {
+        self.execute_request(req)
+    }
 }
 
 impl tower_service::Service<Request> for &'_ Client {
@@ -2716,7 +2779,9 @@ impl tower_service::Service<Request> for &'_ Client {
         Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, req: Request) -> Self::Future { self.execute_request(req) }
+    fn call(&mut self, req: Request) -> Self::Future {
+        self.execute_request(req)
+    }
 }
 
 impl fmt::Debug for ClientBuilder {
@@ -2867,10 +2932,20 @@ type MaybeCookieService<T> = T;
 #[cfg(feature = "cookies")]
 type MaybeCookieService<T> = CookieService<T>;
 
-#[cfg(not(any(feature = "gzip", feature = "brotli", feature = "zstd", feature = "deflate")))]
+#[cfg(not(any(
+    feature = "gzip",
+    feature = "brotli",
+    feature = "zstd",
+    feature = "deflate"
+)))]
 type MaybeDecompression<T> = T;
 
-#[cfg(any(feature = "gzip", feature = "brotli", feature = "zstd", feature = "deflate"))]
+#[cfg(any(
+    feature = "gzip",
+    feature = "brotli",
+    feature = "zstd",
+    feature = "deflate"
+))]
 type MaybeDecompression<T> = Decompression<T>;
 
 type LayeredService<T> = MaybeDecompression<
@@ -2973,7 +3048,9 @@ enum ResponseFuture {
 }
 
 impl PendingRequest {
-    fn in_flight(self: Pin<&mut Self>) -> Pin<&mut ResponseFuture> { self.project().in_flight }
+    fn in_flight(self: Pin<&mut Self>) -> Pin<&mut ResponseFuture> {
+        self.project().in_flight
+    }
 
     fn total_timeout(self: Pin<&mut Self>) -> Pin<&mut Option<Pin<Box<Sleep>>>> {
         self.project().total_timeout
@@ -2986,10 +3063,14 @@ impl PendingRequest {
 
 impl Pending {
     pub(super) fn new_err(err: crate::Error) -> Pending {
-        Pending { inner: PendingInner::Error(Some(err)) }
+        Pending {
+            inner: PendingInner::Error(Some(err)),
+        }
     }
 
-    fn inner(self: Pin<&mut Self>) -> Pin<&mut PendingInner> { self.project().inner }
+    fn inner(self: Pin<&mut Self>) -> Pin<&mut PendingInner> {
+        self.project().inner
+    }
 }
 
 impl Future for Pending {
@@ -2999,9 +3080,9 @@ impl Future for Pending {
         let inner = self.inner();
         match inner.get_mut() {
             PendingInner::Request(ref mut req) => Pin::new(req).poll(cx),
-            PendingInner::Error(ref mut err) => {
-                Poll::Ready(Err(err.take().expect("Pending error polled more than once")))
-            }
+            PendingInner::Error(ref mut err) => Poll::Ready(Err(err
+                .take()
+                .expect("Pending error polled more than once"))),
         }
     }
 }
@@ -3042,15 +3123,22 @@ impl Future for PendingRequest {
             },
         };
 
-        if let Some(url) = &res.extensions().get::<tower_http::follow_redirect::RequestUri>() {
+        if let Some(url) = &res
+            .extensions()
+            .get::<tower_http::follow_redirect::RequestUri>()
+        {
             self.url = match Url::parse(&url.0.to_string()) {
                 Ok(url) => url,
                 Err(e) => return Poll::Ready(Err(crate::error::decode(e))),
             }
         };
 
-        let res =
-            Response::new(res, self.url.clone(), self.total_timeout.take(), self.read_timeout);
+        let res = Response::new(
+            res,
+            self.url.clone(),
+            self.total_timeout.take(),
+            self.read_timeout,
+        );
         Poll::Ready(Ok(res))
     }
 }

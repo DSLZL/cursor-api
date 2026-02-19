@@ -57,7 +57,7 @@ pub use crate::common::build::BUILD_VERSION;
 pub use crate::common::build::{BUILD_TIMESTAMP, IS_DEBUG, IS_PRERELEASE, VERSION};
 
 pub const MIN_COMPAT_VERSION: super::model::version::Version =
-    super::model::version::preview(0, 4, 0, 14);
+    super::model::version::preview(0, 4, 0, 23);
 
 pub struct ExeName(bool);
 

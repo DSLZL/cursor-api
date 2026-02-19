@@ -6,7 +6,9 @@ use std::sync::atomic::Ordering::Acquire;
 
 use saa::lock::Mode;
 use saa::{Lock, Pager};
-use sdd::{AtomicShared, Guard};
+use sdd::AtomicShared;
+
+use crate::Guard;
 
 /// [`AsyncGuard`] is used when an asynchronous task needs to be suspended without invalidating any
 /// references.
@@ -31,11 +33,11 @@ pub(crate) trait LockPager {
     ///
     /// Returns `true` if the thread can retry the operation in-place.
     #[must_use]
-    fn try_wait(&mut self, lock: &Lock) -> bool;
+    fn try_wait<const READ: bool>(&mut self, lock: &Lock) -> bool;
 
     /// Tries to acquire the [`Lock`] synchronously, or registers the [`Pager`] in the [`Lock`] and
     /// returns an error.
-    fn try_acquire(&mut self, lock: &Lock) -> Result<bool, ()>;
+    fn try_acquire<const READ: bool>(&mut self, lock: &Lock) -> Result<bool, ()>;
 }
 
 impl AsyncGuard {
@@ -111,7 +113,7 @@ impl Default for AsyncPager {
 
 impl LockPager for Pin<&mut AsyncPager> {
     #[inline]
-    fn try_wait(&mut self, lock: &Lock) -> bool {
+    fn try_wait<const READ: bool>(&mut self, lock: &Lock) -> bool {
         let this = unsafe { ptr::read(self) };
         let mut pinned_pager = unsafe {
             let pager_ref = std::mem::transmute::<&mut Pager<'static, Lock>, &mut Pager<Lock>>(
@@ -119,32 +121,42 @@ impl LockPager for Pin<&mut AsyncPager> {
             );
             Pin::new_unchecked(pager_ref)
         };
-        lock.register_pager(&mut pinned_pager, Mode::WaitExclusive, false);
+        let mode = if READ {
+            Mode::WaitShared
+        } else {
+            Mode::WaitExclusive
+        };
+        lock.register_pager(&mut pinned_pager, mode, false);
         false
     }
 
     #[inline]
-    fn try_acquire(&mut self, lock: &Lock) -> Result<bool, ()> {
-        if lock.try_lock() {
+    fn try_acquire<const READ: bool>(&mut self, lock: &Lock) -> Result<bool, ()> {
+        if (READ && lock.try_share()) || (!READ && lock.try_lock()) {
             return Ok(true);
         } else if lock.is_poisoned(Acquire) {
             return Ok(false);
         }
-        let _: bool = self.try_wait(lock);
+        let _: bool = self.try_wait::<READ>(lock);
         Err(())
     }
 }
 
 impl LockPager for () {
     #[inline]
-    fn try_wait(&mut self, lock: &Lock) -> bool {
+    fn try_wait<const READ: bool>(&mut self, lock: &Lock) -> bool {
         let mut pinned_pager = pin!(Pager::default());
-        lock.register_pager(&mut pinned_pager, Mode::WaitExclusive, true);
+        let mode = if READ {
+            Mode::WaitShared
+        } else {
+            Mode::WaitExclusive
+        };
+        lock.register_pager(&mut pinned_pager, mode, true);
         pinned_pager.poll_sync().is_ok_and(|r| r)
     }
 
     #[inline]
-    fn try_acquire(&mut self, lock: &Lock) -> Result<bool, ()> {
-        Ok(lock.lock_sync())
+    fn try_acquire<const READ: bool>(&mut self, lock: &Lock) -> Result<bool, ()> {
+        Ok((READ && lock.share_sync()) || (!READ && lock.lock_sync()))
     }
 }

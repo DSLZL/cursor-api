@@ -68,11 +68,13 @@ fn __intern(pool: &HashSet<&'static str>, s: &str) -> (Id, bool) {
         None => (s, false),
     };
 
-    let id = match pool.raw_entry().from_key_sync(key) {
+    let builder = pool.raw_entry();
+    let hash = builder.hash(key);
+    let id = match builder.from_key_hashed_nocheck_sync(hash, key) {
         RawEntry::Occupied(entry) => Id::from_ref(entry.key()),
         RawEntry::Vacant(entry) => {
             let leaked = unsafe { alloc_ids(s) };
-            entry.insert(leaked.non_suffix(), ());
+            entry.insert_hashed_nocheck(hash, leaked.non_suffix(), ());
             leaked
         }
     };

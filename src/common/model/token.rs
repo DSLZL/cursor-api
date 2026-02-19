@@ -1,6 +1,6 @@
 use crate::app::{
     constant::{AUDIENCE, ISSUER, SCOPE, TYPE_SESSION, TYPE_WEB},
-    model::{Randomness, Subject},
+    model::{Randomness, SessionId, Subject},
 };
 use proto_value::stringify::Stringify;
 
@@ -10,6 +10,7 @@ pub struct TokenPayload {
     pub randomness: Randomness,
     pub exp: i64,
     pub is_session: bool,
+    pub workos_session_id: SessionId,
 }
 
 // 定义所有常量
@@ -30,6 +31,7 @@ crate::define_typed_constants! {
         FIELD_SCOPE = "scope",
         FIELD_AUD = "aud",
         FIELD_TYPE = "type",
+        FIELD_WORKOS_SESSION_ID = "workosSessionId",
 
         // 错误消息
         MSG_EXPECTING_FIELD = "字段名称",
@@ -49,6 +51,7 @@ crate::define_typed_constants! {
             FIELD_SCOPE,
             FIELD_AUD,
             FIELD_TYPE,
+            FIELD_WORKOS_SESSION_ID,
         ],
     }
 }
@@ -58,7 +61,8 @@ impl ::serde::Serialize for TokenPayload {
     where S: ::serde::Serializer {
         use ::serde::ser::SerializeStruct as _;
 
-        let mut state = serializer.serialize_struct(STRUCT_NAME, FIELD_COUNT)?;
+        let exist_workos_session_id = !self.workos_session_id.is_empty();
+        let mut state = serializer.serialize_struct(STRUCT_NAME, FIELD_COUNT + exist_workos_session_id as usize)?;
         state.serialize_field(FIELD_SUB, &self.sub)?;
         state.serialize_field(FIELD_TIME, &self.time)?;
         state.serialize_field(FIELD_RANDOMNESS, &self.randomness)?;
@@ -67,6 +71,9 @@ impl ::serde::Serialize for TokenPayload {
         state.serialize_field(FIELD_SCOPE, SCOPE)?;
         state.serialize_field(FIELD_AUD, AUDIENCE)?;
         state.serialize_field(FIELD_TYPE, if self.is_session { TYPE_SESSION } else { TYPE_WEB })?;
+        if exist_workos_session_id {
+            state.serialize_field(FIELD_WORKOS_SESSION_ID, &self.workos_session_id)?;
+        }
         state.end()
     }
 }
@@ -86,7 +93,24 @@ impl<'de> ::serde::Deserialize<'de> for TokenPayload {
             Scope,
             Aud,
             Type,
+            WorkosSessionId,
         }
+
+        static FIELDS: ::phf::Map<&'static str, Field> = phf::Map {
+            key: 16287231350648472473u64,
+            disps: &[(1u32, 3u32), (3u32, 0u32)],
+            entries: &[
+                (FIELD_SUB, Field::Sub),
+                (FIELD_RANDOMNESS, Field::Randomness),
+                (FIELD_ISS, Field::Iss),
+                (FIELD_TYPE, Field::Type),
+                (FIELD_WORKOS_SESSION_ID, Field::WorkosSessionId),
+                (FIELD_TIME, Field::Time),
+                (FIELD_SCOPE, Field::Scope),
+                (FIELD_AUD, Field::Aud),
+                (FIELD_EXP, Field::Exp),
+            ],
+        };
 
         impl<'de> ::serde::Deserialize<'de> for Field {
             fn deserialize<D>(deserializer: D) -> Result<Field, D::Error>
@@ -105,16 +129,9 @@ impl<'de> ::serde::Deserialize<'de> for TokenPayload {
 
                     fn visit_str<E>(self, value: &str) -> Result<Field, E>
                     where E: de::Error {
-                        match value {
-                            FIELD_SUB => Ok(Field::Sub),
-                            FIELD_TIME => Ok(Field::Time),
-                            FIELD_RANDOMNESS => Ok(Field::Randomness),
-                            FIELD_EXP => Ok(Field::Exp),
-                            FIELD_ISS => Ok(Field::Iss),
-                            FIELD_SCOPE => Ok(Field::Scope),
-                            FIELD_AUD => Ok(Field::Aud),
-                            FIELD_TYPE => Ok(Field::Type),
-                            _ => Err(de::Error::unknown_field(value, FIELD_NAMES)),
+                        match FIELDS.get(value) {
+                            Some(field) => Ok(*field),
+                            None => Err(de::Error::unknown_field(value, FIELD_NAMES)),
                         }
                     }
                 }
@@ -139,6 +156,7 @@ impl<'de> ::serde::Deserialize<'de> for TokenPayload {
                 let mut randomness = None;
                 let mut exp = None;
                 let mut is_session = None;
+                let mut workos_session_id = None;
                 let mut iss_seen = false;
                 let mut scope_seen = false;
                 let mut aud_seen = false;
@@ -183,6 +201,12 @@ impl<'de> ::serde::Deserialize<'de> for TokenPayload {
                                     )));
                                 }
                             });
+                        }
+                        Field::WorkosSessionId => {
+                            if workos_session_id.is_some() {
+                                return Err(de::Error::duplicate_field(FIELD_WORKOS_SESSION_ID));
+                            }
+                            workos_session_id = Some(map.next_value()?);
                         }
                         Field::Iss => {
                             if iss_seen {
@@ -230,6 +254,8 @@ impl<'de> ::serde::Deserialize<'de> for TokenPayload {
                     randomness.ok_or_else(|| de::Error::missing_field(FIELD_RANDOMNESS))?;
                 let exp = exp.ok_or_else(|| de::Error::missing_field(FIELD_EXP))?;
                 let is_session = is_session.ok_or_else(|| de::Error::missing_field(FIELD_TYPE))?;
+                let workos_session_id = workos_session_id
+                    .unwrap_or_else(SessionId::empty);
 
                 // 检查必须存在的常量字段
                 if !iss_seen {
@@ -242,7 +268,7 @@ impl<'de> ::serde::Deserialize<'de> for TokenPayload {
                     return Err(de::Error::missing_field(FIELD_AUD));
                 }
 
-                Ok(TokenPayload { sub, time, randomness, exp, is_session })
+                Ok(TokenPayload { sub, time, randomness, exp, is_session, workos_session_id })
             }
         }
 

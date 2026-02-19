@@ -45,10 +45,10 @@
 
 #[cfg(feature = "__rustls")]
 use rustls::{
-    DigitallySignedStruct, Error as TLSError, RootCertStore, SignatureScheme,
     client::danger::HandshakeSignatureValid, client::danger::ServerCertVerified,
     client::danger::ServerCertVerifier, crypto::WebPkiSupportedAlgorithms,
-    server::ParsedCertificate,
+    server::ParsedCertificate, DigitallySignedStruct, Error as TLSError, RootCertStore,
+    SignatureScheme,
 };
 use rustls_pki_types::pem::PemObject;
 #[cfg(feature = "__rustls")]
@@ -84,7 +84,10 @@ enum Cert {
 /// Represents a private key and X509 cert as a client certificate.
 #[derive(Clone)]
 pub struct Identity {
-    #[cfg_attr(not(any(feature = "__native-tls", feature = "__rustls")), allow(unused))]
+    #[cfg_attr(
+        not(any(feature = "__native-tls", feature = "__rustls")),
+        allow(unused)
+    )]
     inner: ClientCert,
 }
 
@@ -108,9 +111,10 @@ impl Clone for ClientCert {
             #[cfg(feature = "__native-tls")]
             Self::Pkcs12(i) => Self::Pkcs12(i.clone()),
             #[cfg(feature = "__rustls")]
-            ClientCert::Pem { key, certs } => {
-                ClientCert::Pem { key: key.clone_key(), certs: certs.clone() }
-            }
+            ClientCert::Pem { key, certs } => ClientCert::Pem {
+                key: key.clone_key(),
+                certs: certs.clone(),
+            },
             #[cfg_attr(
                 any(feature = "__native-tls", feature = "__rustls"),
                 allow(unreachable_patterns)
@@ -217,12 +221,16 @@ impl Certificate {
         use std::io::Cursor;
 
         match self.original {
-            Cert::Der(buf) => root_cert_store.add(buf.into()).map_err(crate::error::builder)?,
+            Cert::Der(buf) => root_cert_store
+                .add(buf.into())
+                .map_err(crate::error::builder)?,
             Cert::Pem(buf) => {
                 let mut reader = Cursor::new(buf);
                 let certs = Self::read_pem_certs(&mut reader)?;
                 for c in certs {
-                    root_cert_store.add(c.into()).map_err(crate::error::builder)?;
+                    root_cert_store
+                        .add(c.into())
+                        .map_err(crate::error::builder)?;
                 }
             }
         }
@@ -341,7 +349,7 @@ impl Identity {
     /// This requires the `rustls(-...)` Cargo feature enabled.
     #[cfg(feature = "__rustls")]
     pub fn from_pem(buf: &[u8]) -> crate::Result<Identity> {
-        use rustls_pki_types::{PrivateKeyDer, pem::SectionKind};
+        use rustls_pki_types::{pem::SectionKind, PrivateKeyDer};
         use std::io::Cursor;
 
         let (key, certs) = {
@@ -364,7 +372,7 @@ impl Identity {
                     _ => {
                         return Err(crate::error::builder(TLSError::General(String::from(
                             "No valid certificate was found",
-                        ))));
+                        ))))
                     }
                 }
             }
@@ -378,7 +386,9 @@ impl Identity {
             }
         };
 
-        Ok(Identity { inner: ClientCert::Pem { key, certs } })
+        Ok(Identity {
+            inner: ClientCert::Pem { key, certs },
+        })
     }
 
     #[cfg(feature = "__native-tls")]
@@ -406,9 +416,9 @@ impl Identity {
         >,
     ) -> crate::Result<rustls::ClientConfig> {
         match self.inner {
-            ClientCert::Pem { key, certs } => {
-                config_builder.with_client_auth_cert(certs, key).map_err(crate::error::builder)
-            }
+            ClientCert::Pem { key, certs } => config_builder
+                .with_client_auth_cert(certs, key)
+                .map_err(crate::error::builder),
             #[cfg(feature = "__native-tls")]
             ClientCert::Pkcs12(..) | ClientCert::Pkcs8(..) => {
                 Err(crate::error::builder("incompatible TLS identity type"))
@@ -485,11 +495,15 @@ impl CertificateRevocationList {
 }
 
 impl fmt::Debug for Certificate {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { f.debug_struct("Certificate").finish() }
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("Certificate").finish()
+    }
 }
 
 impl fmt::Debug for Identity {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { f.debug_struct("Identity").finish() }
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("Identity").finish()
+    }
 }
 
 #[cfg(feature = "__rustls")]
@@ -583,7 +597,10 @@ impl fmt::Debug for TlsBackend {
 #[allow(clippy::derivable_impls)]
 impl Default for TlsBackend {
     fn default() -> TlsBackend {
-        #[cfg(any(all(feature = "__rustls", not(feature = "__native-tls")), feature = "http3"))]
+        #[cfg(any(
+            all(feature = "__rustls", not(feature = "__native-tls")),
+            feature = "http3"
+        ))]
         {
             TlsBackend::Rustls
         }
@@ -699,7 +716,10 @@ impl IgnoreHostname {
         roots: RootCertStore,
         signature_algorithms: WebPkiSupportedAlgorithms,
     ) -> Self {
-        Self { roots, signature_algorithms }
+        Self {
+            roots,
+            signature_algorithms,
+        }
     }
 }
 
@@ -774,11 +794,15 @@ mod tests {
 
     #[cfg(feature = "__native-tls")]
     #[test]
-    fn certificate_from_der_invalid() { Certificate::from_der(b"not der").unwrap_err(); }
+    fn certificate_from_der_invalid() {
+        Certificate::from_der(b"not der").unwrap_err();
+    }
 
     #[cfg(feature = "__native-tls")]
     #[test]
-    fn certificate_from_pem_invalid() { Certificate::from_pem(b"not pem").unwrap_err(); }
+    fn certificate_from_pem_invalid() {
+        Certificate::from_pem(b"not pem").unwrap_err();
+    }
 
     #[cfg(feature = "__native-tls")]
     #[test]
@@ -794,7 +818,9 @@ mod tests {
 
     #[cfg(feature = "__rustls")]
     #[test]
-    fn identity_from_pem_invalid() { Identity::from_pem(b"not pem").unwrap_err(); }
+    fn identity_from_pem_invalid() {
+        Identity::from_pem(b"not pem").unwrap_err();
+    }
 
     #[cfg(feature = "__rustls")]
     #[test]

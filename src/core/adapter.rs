@@ -147,7 +147,7 @@ impl BaseUuid {
     #[inline]
     fn new() -> Self {
         Self {
-            inner: rand::Rng::random_range(&mut rand::rng(), 256u16..384),
+            inner: rand::RngExt::random_range(&mut rand::rng(), 256u16..384),
             buffer: itoa::Buffer::new(),
         }
     }

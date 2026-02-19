@@ -34,7 +34,7 @@ impl core::fmt::Display for ExceedSizeLimit {
     }
 }
 
-impl std::error::Error for ExceedSizeLimit {}
+impl ::core::error::Error for ExceedSizeLimit {}
 
 impl axum::response::IntoResponse for ExceedSizeLimit {
     #[inline]

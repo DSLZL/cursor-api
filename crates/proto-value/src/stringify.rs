@@ -242,6 +242,7 @@ pub fn deserialize<'de, T: Item, D: Deserializer<'de>>(deserializer: D) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::{Deserialize, Serialize};
     use serde_json::{from_str, to_string};
 
     #[derive(Serialize, Deserialize, Debug, PartialEq)]

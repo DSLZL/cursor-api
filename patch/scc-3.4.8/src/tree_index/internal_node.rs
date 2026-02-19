@@ -1,10 +1,10 @@
-use std::mem::forget;
+use std::mem::{ManuallyDrop, forget};
 use std::ops::RangeBounds;
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 use std::{fmt, ptr};
 
 use saa::Lock;
-use sdd::{AtomicShared, Guard, Ptr, Shared, Tag};
+use sdd::{AtomicShared, Ptr, Shared, Tag};
 
 use super::leaf::{
     Array, ArrayIter, ArrayRevIter, InsertResult, Iter, Leaf, RemoveResult, RevIter,
@@ -12,8 +12,8 @@ use super::leaf::{
 use super::leaf_node::Locker as LeafNodeLocker;
 use super::leaf_node::RemoveRangeState;
 use super::node::Node;
-use crate::Comparable;
 use crate::async_helper::LockPager;
+use crate::{Comparable, Guard};
 
 /// Internal node.
 ///
@@ -32,7 +32,7 @@ pub struct InternalNode<K, V> {
 
 /// [`Locker`] holds exclusive ownership of an [`InternalNode`].
 pub(super) struct Locker<'n, K, V> {
-    pub(super) internal_node: &'n InternalNode<K, V>,
+    pub(super) node: &'n InternalNode<K, V>,
 }
 
 impl<K, V> InternalNode<K, V> {
@@ -46,12 +46,21 @@ impl<K, V> InternalNode<K, V> {
         }
     }
 
+    /// Creates a new empty internal node in a frozen state.
+    #[inline]
+    pub(super) fn new_frozen() -> InternalNode<K, V> {
+        InternalNode {
+            unbounded_child: AtomicShared::null(),
+            children: Array::new_frozen(),
+            lock: Lock::default(),
+        }
+    }
+
     /// Returns the depth of the node.
     #[inline]
     pub(super) fn depth(&self, depth: usize, guard: &Guard) -> usize {
-        let unbounded_ptr = self.unbounded_child.load(Relaxed, guard);
-        if let Some(unbounded_ref) = unbounded_ptr.as_ref() {
-            return unbounded_ref.depth(depth + 1, guard);
+        if let Some(unbounded) = self.unbounded_child.load(Acquire, guard).as_ref() {
+            return unbounded.depth(depth + 1, guard);
         }
         depth
     }
@@ -121,6 +130,40 @@ where
                     }
                 } else {
                     return None;
+                }
+            }
+        }
+    }
+
+    /// Reads an entry using the supplied closure.
+    #[inline]
+    pub fn read_entry<Q, R, F: FnOnce(&K, &V) -> R, P: LockPager>(
+        &self,
+        key: &Q,
+        reader: F,
+        pager: &mut P,
+        guard: &Guard,
+    ) -> Result<Option<R>, F>
+    where
+        Q: Comparable<K> + ?Sized,
+    {
+        loop {
+            let (child, metadata) = self.children.min_greater_equal(key);
+            if let Some(child) = child {
+                if let Some(child) = child.load(Acquire, guard).as_ref() {
+                    if self.children.validate(metadata) {
+                        // Data race resolution - see `LeafNode::search_entry`.
+                        return child.read_entry(key, reader, pager, guard);
+                    }
+                }
+            } else {
+                let unbounded_ptr = self.unbounded_child.load(Acquire, guard);
+                if let Some(unbounded) = unbounded_ptr.as_ref() {
+                    if self.children.validate(metadata) {
+                        return unbounded.read_entry(key, reader, pager, guard);
+                    }
+                } else {
+                    return Ok(None);
                 }
             }
         }
@@ -266,9 +309,9 @@ where
                         // Data race resolution - see `LeafNode::search_entry`.
                         let insert_result = child_ref.insert(key, val, pager, guard)?;
                         match insert_result {
-                            InsertResult::Success
-                            | InsertResult::Duplicate(..)
-                            | InsertResult::Frozen(..) => return Ok(insert_result),
+                            InsertResult::Success | InsertResult::Duplicate(..) => {
+                                return Ok(insert_result);
+                            }
                             InsertResult::Full(k, v) => {
                                 match self.split_node(child_ptr, child, pager, guard) {
                                     Ok(true) => {
@@ -294,9 +337,9 @@ where
                 }
                 let insert_result = unbounded.insert(key, val, pager, guard)?;
                 match insert_result {
-                    InsertResult::Success
-                    | InsertResult::Duplicate(..)
-                    | InsertResult::Frozen(..) => return Ok(insert_result),
+                    InsertResult::Success | InsertResult::Duplicate(..) => {
+                        return Ok(insert_result);
+                    }
                     InsertResult::Full(k, v) => {
                         match self.split_node(unbounded_ptr, &self.unbounded_child, pager, guard) {
                             Ok(true) => {
@@ -384,10 +427,8 @@ where
         debug_assert!(valid_lower_max_leaf.is_none() || start_unbounded);
         debug_assert!(valid_lower_max_leaf.is_none() || valid_upper_min_node.is_none());
 
-        let locker = if pager.try_acquire(&self.lock)? {
-            Locker {
-                internal_node: self,
-            }
+        let locker = if pager.try_acquire::<false>(&self.lock)? {
+            Locker { node: self }
         } else {
             // The internal node was retired: retry.
             return Err(());
@@ -530,14 +571,13 @@ where
         pager: &mut P,
         guard: &Guard,
     ) -> Result<bool, ()> {
-        if self.is_retired() {
-            // Let the parent node clean up this node.
-            return Ok(false);
-        }
         let Some(locker) = Locker::try_lock(self) else {
-            // Do not wait-and-acquire the lock as it is most likely that the node has already been
-            // split by the time it acquires the lock.
-            if pager.try_wait(&self.lock) {
+            if self.is_retired() {
+                // Let the parent node clean up this node.
+                return Ok(false);
+            } else if pager.try_wait::<false>(&self.lock) {
+                // Do not wait-and-acquire the lock as it is most likely that the node has already
+                // been split by the time it acquires the lock.
                 return Ok(true);
             }
             return Err(());
@@ -551,10 +591,8 @@ where
         let is_full = self.children.is_full();
         match target {
             Node::Internal(target) => {
-                let target_locker = if pager.try_acquire(&target.lock)? {
-                    Locker {
-                        internal_node: target,
-                    }
+                let target_locker = if pager.try_acquire::<false>(&target.lock)? {
+                    Locker { node: target }
                 } else {
                     // The target node was retired.
                     if self.post_remove(Some(locker), guard).1 == RemoveResult::Success {
@@ -590,9 +628,7 @@ where
                             return;
                         } else if i < boundary {
                             let low_key_internal_node = low_key_node.get_or_insert_with(|| {
-                                let node = Shared::new_with(Node::new_internal_node);
-                                node.freeze();
-                                node
+                                Shared::new_with(Node::new_internal_node_frozen)
                             });
                             let Node::Internal(low_key_internal_node) =
                                 low_key_internal_node.as_ref()
@@ -605,7 +641,8 @@ where
                                 low_key_internal_node
                                     .unbounded_child
                                     .swap((v.get_shared(Acquire, guard), Tag::None), Relaxed);
-                                boundary_key.replace(k.clone());
+                                boundary_key
+                                    .replace(ManuallyDrop::new(unsafe { ptr::from_ref(k).read() }));
                             } else {
                                 low_key_internal_node.children.insert_unchecked(
                                     unsafe { ptr::from_ref(k).read() },
@@ -616,9 +653,7 @@ where
                         } else {
                             debug_assert!(!is_full);
                             let high_key_node = high_key_node.get_or_insert_with(|| {
-                                let node = Shared::new_with(Node::new_internal_node);
-                                node.freeze();
-                                node
+                                Shared::new_with(Node::new_internal_node_frozen)
                             });
                             let Node::Internal(high_key_internal_node) = high_key_node.as_ref()
                             else {
@@ -636,11 +671,8 @@ where
                     return Ok(false);
                 }
 
-                let low_key_node = low_key_node.unwrap_or_else(|| {
-                    let node = Shared::new_with(Node::new_internal_node);
-                    node.freeze();
-                    node
-                });
+                let low_key_node = low_key_node
+                    .unwrap_or_else(|| Shared::new_with(Node::new_internal_node_frozen));
                 let Node::Internal(low_key_internal_node) = low_key_node.as_ref() else {
                     // Technically unreachable.
                     return Err(());
@@ -659,11 +691,8 @@ where
                     );
                     full_node.swap((Some(low_key_node), Tag::None), AcqRel);
                 } else {
-                    let high_key_node = high_key_node.unwrap_or_else(|| {
-                        let node = Shared::new_with(Node::new_internal_node);
-                        node.freeze();
-                        node
-                    });
+                    let high_key_node = high_key_node
+                        .unwrap_or_else(|| Shared::new_with(Node::new_internal_node_frozen));
                     let (Node::Internal(high_key_internal_node), Some(key)) =
                         (high_key_node.as_ref(), boundary_key)
                     else {
@@ -686,7 +715,10 @@ where
                         unsafe { ptr::from_ref(&low_key_internal_node.unbounded_child).read() };
                     drop(unbounded_child);
 
-                    let result = self.children.insert(key, AtomicShared::from(low_key_node));
+                    let result = self.children.insert(
+                        ManuallyDrop::into_inner(key),
+                        AtomicShared::from(low_key_node),
+                    );
                     debug_assert!(matches!(result, InsertResult::Success));
                     full_node.swap((Some(high_key_node), Tag::None), Release);
                 }
@@ -698,8 +730,8 @@ where
                 target_locker.unlock_retire();
             }
             Node::Leaf(target) => {
-                let target_locker = if pager.try_acquire(&target.lock)? {
-                    LeafNodeLocker { leaf_node: target }
+                let target_locker = if pager.try_acquire::<false>(&target.lock)? {
+                    LeafNodeLocker { node: target }
                 } else {
                     // The target node was retired.
                     if self.post_remove(Some(locker), guard).1 == RemoveResult::Success {
@@ -724,9 +756,7 @@ where
                     |k, v, _, boundary| {
                         if i < boundary {
                             let low_key_node = low_key_node.get_or_insert_with(|| {
-                                let node = Shared::new_with(Node::new_leaf_node);
-                                node.freeze();
-                                node
+                                Shared::new_with(Node::new_leaf_node_frozen)
                             });
                             let Node::Leaf(low_key_leaf_node) = low_key_node.as_ref() else {
                                 return;
@@ -737,7 +767,8 @@ where
                                 low_key_leaf_node
                                     .unbounded_child
                                     .swap((v.get_shared(Acquire, guard), Tag::None), Relaxed);
-                                boundary_key.replace(k.clone());
+                                boundary_key
+                                    .replace(ManuallyDrop::new(unsafe { ptr::from_ref(k).read() }));
                             } else {
                                 low_key_leaf_node.children.insert_unchecked(
                                     unsafe { ptr::from_ref(k).read() },
@@ -748,9 +779,7 @@ where
                         } else {
                             debug_assert!(!is_full);
                             let high_key_node = high_key_node.get_or_insert_with(|| {
-                                let node = Shared::new_with(Node::new_leaf_node);
-                                node.freeze();
-                                node
+                                Shared::new_with(Node::new_leaf_node_frozen)
                             });
                             let Node::Leaf(high_key_leaf_node) = high_key_node.as_ref() else {
                                 return;
@@ -767,11 +796,8 @@ where
                     return Ok(false);
                 }
 
-                let low_key_node = low_key_node.unwrap_or_else(|| {
-                    let node = Shared::new_with(Node::new_leaf_node);
-                    node.freeze();
-                    node
-                });
+                let low_key_node =
+                    low_key_node.unwrap_or_else(|| Shared::new_with(Node::new_leaf_node_frozen));
                 let Node::Leaf(low_key_leaf_node) = low_key_node.as_ref() else {
                     // Technically unreachable.
                     return Err(());
@@ -790,11 +816,8 @@ where
                     );
                     full_node.swap((Some(low_key_node), Tag::None), AcqRel);
                 } else {
-                    let high_key_node = high_key_node.unwrap_or_else(|| {
-                        let node = Shared::new_with(Node::new_leaf_node);
-                        node.freeze();
-                        node
-                    });
+                    let high_key_node = high_key_node
+                        .unwrap_or_else(|| Shared::new_with(Node::new_leaf_node_frozen));
                     let (Node::Leaf(high_key_leaf_node), Some(key)) =
                         (high_key_node.as_ref(), boundary_key)
                     else {
@@ -817,7 +840,10 @@ where
                         unsafe { ptr::from_ref(&low_key_leaf_node.unbounded_child).read() };
                     drop(unbounded_child);
 
-                    let result = self.children.insert(key, AtomicShared::from(low_key_node));
+                    let result = self.children.insert(
+                        ManuallyDrop::into_inner(key),
+                        AtomicShared::from(low_key_node),
+                    );
                     debug_assert!(matches!(result, InsertResult::Success));
                     full_node.swap((Some(high_key_node), Tag::None), Release);
                 }
@@ -937,7 +963,9 @@ impl<'n, K, V> Locker<'n, K, V> {
     #[inline]
     pub(super) fn try_lock(internal_node: &'n InternalNode<K, V>) -> Option<Locker<'n, K, V>> {
         if internal_node.lock.try_lock() {
-            Some(Locker { internal_node })
+            Some(Locker {
+                node: internal_node,
+            })
         } else {
             None
         }
@@ -946,7 +974,7 @@ impl<'n, K, V> Locker<'n, K, V> {
     /// Retires the leaf node by poisoning the lock.
     #[inline]
     pub(super) fn unlock_retire(self) {
-        self.internal_node.lock.poison_lock();
+        self.node.lock.poison_lock();
         forget(self);
     }
 }
@@ -954,7 +982,7 @@ impl<'n, K, V> Locker<'n, K, V> {
 impl<K, V> Drop for Locker<'_, K, V> {
     #[inline]
     fn drop(&mut self) {
-        self.internal_node.lock.release_lock();
+        self.node.lock.release_lock();
     }
 }
 
@@ -990,7 +1018,7 @@ mod test {
                     InsertResult::Success => {
                         assert_eq!(internal_node.search_entry(&k, &guard), Some((&k, &k)));
                     }
-                    InsertResult::Duplicate(..) | InsertResult::Frozen(..) => unreachable!(),
+                    InsertResult::Duplicate(..) => unreachable!(),
                     InsertResult::Full(_, _) => {
                         for j in 0..k {
                             assert_eq!(internal_node.search_entry(&j, &guard), Some((&j, &j)));
@@ -1062,7 +1090,6 @@ mod test {
                                         max_key.replace(id);
                                         break;
                                     }
-                                    InsertResult::Frozen(..) => (),
                                     InsertResult::Duplicate(..) => unreachable!(),
                                 }
                             }

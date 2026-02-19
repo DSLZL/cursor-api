@@ -4,9 +4,7 @@ mod common {
     use std::hash::{BuildHasher, Hash};
     use std::ptr::addr_of;
 
-    use sdd::Guard;
-
-    use crate::{HashIndex, HashMap, TreeIndex};
+    use crate::{Guard, HashIndex, HashMap, TreeIndex};
 
     #[allow(clippy::struct_excessive_bools)]
     #[derive(Clone, Copy, Debug, Default)]
@@ -274,11 +272,10 @@ mod async_benchmarks {
     use std::sync::atomic::Ordering::Relaxed;
     use std::time::{Duration, Instant};
 
-    use sdd::Guard;
     use tokio::sync::Barrier;
 
     use super::common::{BenchmarkOperation, ConvertFromUsize, Workload};
-    use crate::{HashIndex, HashMap, TreeIndex};
+    use crate::{Guard, HashIndex, HashMap, TreeIndex};
 
     async fn perform<K, V, C>(
         num_tasks: usize,
@@ -528,10 +525,8 @@ mod sync_benchmarks {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use sdd::Guard;
-
     use super::common::{BenchmarkOperation, ConvertFromUsize, Workload};
-    use crate::{HashIndex, HashMap, TreeIndex};
+    use crate::{Guard, HashIndex, HashMap, TreeIndex};
 
     fn perform<K, V, C>(
         num_threads: usize,

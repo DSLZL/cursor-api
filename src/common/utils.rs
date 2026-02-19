@@ -563,12 +563,12 @@ pub fn tokeninfo_to_token(tuple: (configured_key::TokenInfo, [u8; 32])) -> Optio
 #[inline]
 fn generate_pkce_pair() -> ([u8; 43], [u8; 43]) {
     use core::mem::MaybeUninit;
-    use rand::TryRngCore as _;
+    use rand::TryRng as _;
     use sha2::Digest as _;
 
     // 生成 32 字节随机数作为 verifier
     let mut verifier_bytes = [0u8; 32];
-    rand::rngs::OsRng
+    rand::rngs::SysRng
         .try_fill_bytes(&mut verifier_bytes)
         .expect("System RNG unavailable: cannot generate secure PKCE verifier");
 

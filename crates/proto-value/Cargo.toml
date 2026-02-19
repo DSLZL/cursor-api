@@ -30,4 +30,5 @@ bytes = ["dep:bytes"]
 byte_str = ["dep:byte_str"]
 
 [dev-dependencies]
+serde = "1.0"
 serde_json = "1.0.148"

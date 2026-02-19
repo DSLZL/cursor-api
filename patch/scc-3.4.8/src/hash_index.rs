@@ -14,12 +14,12 @@ use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 
 #[cfg(feature = "loom")]
 use loom::sync::atomic::AtomicUsize;
-use sdd::{AtomicShared, Epoch, Guard, Shared, Tag};
+use sdd::{AtomicShared, Epoch, Shared, Tag};
 
-use super::Equivalent;
 use super::hash_table::bucket::{Bucket, EntryPtr, INDEX};
 use super::hash_table::bucket_array::BucketArray;
 use super::hash_table::{HashTable, LockedBucket};
+use super::{Equivalent, Guard};
 
 /// Scalable asynchronous/concurrent hash index.
 ///
@@ -628,7 +628,7 @@ where
             return false;
         };
         let mut entry_ptr = locked_bucket.search(key, hash);
-        if entry_ptr.is_valid() && condition(&mut locked_bucket.entry_mut(&mut entry_ptr).1) {
+        if entry_ptr.is_valid() && condition(locked_bucket.entry_mut(&mut entry_ptr).1) {
             locked_bucket.mark_removed(self, &mut entry_ptr);
             true
         } else {
@@ -665,7 +665,7 @@ where
             return false;
         };
         let mut entry_ptr = locked_bucket.search(key, hash);
-        if entry_ptr.is_valid() && condition(&mut locked_bucket.entry_mut(&mut entry_ptr).1) {
+        if entry_ptr.is_valid() && condition(locked_bucket.entry_mut(&mut entry_ptr).1) {
             locked_bucket.mark_removed(self, &mut entry_ptr);
             true
         } else {
@@ -752,22 +752,15 @@ where
     ///
     /// # Note
     ///
-    /// The closure may see an old snapshot of the value if the entry has recently been relocated
-    /// due to resizing. This means that the effects of interior mutability, e.g., `Mutex<T>` or
-    /// `UnsafeCell<T>`, may not be observable in the closure.
-    ///
-    /// # Safety
-    ///
-    /// This method is safe to use if the value is not modified or if `V` is a pointer type such as
-    /// `Box<T>` or `Arc<T>`. However, it is unsafe if `V` contains a pointer that can be modified
-    /// through interior mutability.
+    /// The returned reference may point to an old snapshot of the value if the entry has recently
+    /// been relocated due to resizing. This means that the effects of interior mutability, e.g.,
+    /// `Mutex<T>` or `UnsafeCell<T>`, may not be observable later. Use [`HashIndex::read_async`] or
+    /// [`HashIndex::read_sync`] if the value needs to be updated through interior mutability.
     ///
     /// # Examples
     ///
     /// ```
-    /// use scc::HashIndex;
-    ///
-    /// use sdd::Guard;
+    /// use scc::{Guard, HashIndex};
     ///
     /// let hashindex: HashIndex<u64, u32> = HashIndex::default();
     ///
@@ -792,14 +785,10 @@ where
     ///
     /// # Note
     ///
-    /// The closure may see an old snapshot of the value if the entry has recently been relocated
-    /// due to resizing. This means that the effects of interior mutability, e.g., `Mutex<T>` or
-    /// `UnsafeCell<T>`, may not be observable in the closure.
-    ///
-    /// # Safety
-    ///
-    /// This method is safe to use if the value is not modified or if `V` is a pointer type such as
-    /// `Box<T>` or `Arc<T>`. However, it is unsafe if `V` contains a pointer that can be modified
+    /// The reference passed to the closure may point to an old snapshot of the value if the entry
+    /// has recently been relocated due to resizing. This means that the effects of interior
+    /// mutability, e.g., `Mutex<T>` or `UnsafeCell<T>`, may not be observable later. Use
+    /// [`HashIndex::read_async`] or [`HashIndex::read_sync`] if the value needs to be updated
     /// through interior mutability.
     ///
     /// # Examples
@@ -821,6 +810,60 @@ where
         self.reclaim_memory();
         let guard = Guard::new();
         self.peek_entry(key, &guard).map(|(k, v)| reader(k, v))
+    }
+
+    /// Reads a key-value pair.
+    ///
+    /// Returns `None` if the key does not exist.
+    ///
+    /// # Note
+    ///
+    /// This method guarantees that the closure reads the latest snapshot of the value by acquiring
+    /// a shared lock. If lock-free read-only access to entry is required, consider using
+    /// [`HashIndex::peek`] or [`HashIndex::peek_with`].
+    ///
+    /// ```
+    /// use scc::HashIndex;
+    ///
+    /// let hashindex: HashIndex<u64, u32> = HashIndex::default();
+    /// let future_insert = hashindex.insert_async(11, 17);
+    /// let future_read = hashindex.read_async(&11, |_, v| *v);
+    /// ```
+    #[inline]
+    pub async fn read_async<Q, R, F: FnOnce(&K, &V) -> R>(&self, key: &Q, reader: F) -> Option<R>
+    where
+        Q: Equivalent<K> + Hash + ?Sized,
+    {
+        self.reader_async(key, reader).await
+    }
+
+    /// Reads a key-value pair.
+    ///
+    /// Returns `None` if the key does not exist.
+    ///
+    /// # Note
+    ///
+    /// This method guarantees that the closure reads the latest snapshot of the value by acquiring
+    /// a shared lock. If lock-free read-only access to entry is required, consider using
+    /// [`HashIndex::peek`] or [`HashIndex::peek_with`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use scc::HashIndex;
+    ///
+    /// let hashindex: HashIndex<u64, u32> = HashIndex::default();
+    ///
+    /// assert!(hashindex.read_sync(&1, |_, v| *v).is_none());
+    /// assert!(hashindex.insert_sync(1, 10).is_ok());
+    /// assert_eq!(hashindex.read_sync(&1, |_, v| *v).unwrap(), 10);
+    /// ```
+    #[inline]
+    pub fn read_sync<Q, R, F: FnOnce(&K, &V) -> R>(&self, key: &Q, reader: F) -> Option<R>
+    where
+        Q: Equivalent<K> + Hash + ?Sized,
+    {
+        self.reader_sync(key, reader)
     }
 
     /// Returns `true` if the [`HashIndex`] contains a value for the specified key.
@@ -871,8 +914,7 @@ where
         self.for_each_reader_async(|reader, data_block| {
             let mut entry_ptr = EntryPtr::null();
             while entry_ptr.find_next(&reader) {
-                let (k, v) = entry_ptr.get(data_block);
-                if !f(k, v) {
+                if !f(entry_ptr.key(data_block), entry_ptr.val(data_block)) {
                     result = false;
                     return false;
                 }
@@ -915,8 +957,7 @@ where
         self.for_each_reader_sync(&guard, |reader, data_block| {
             let mut entry_ptr = EntryPtr::null();
             while entry_ptr.find_next(&reader) {
-                let (k, v) = entry_ptr.get(data_block);
-                if !f(k, v) {
+                if !f(entry_ptr.key(data_block), entry_ptr.val(data_block)) {
                     result = false;
                     return false;
                 }
@@ -1149,9 +1190,7 @@ where
     /// # Examples
     ///
     /// ```
-    /// use scc::HashIndex;
-    ///
-    /// use sdd::Guard;
+    /// use scc::{Guard, HashIndex};
     ///
     /// let hashindex: HashIndex<u64, u32> = HashIndex::default();
     ///
@@ -1611,7 +1650,7 @@ where
     #[inline]
     #[must_use]
     pub fn key(&self) -> &K {
-        &self.locked_bucket.entry(&self.entry_ptr).0
+        self.locked_bucket.entry(&self.entry_ptr).0
     }
 
     /// Marks that the entry is removed from the [`HashIndex`].
@@ -1656,7 +1695,7 @@ where
     #[inline]
     #[must_use]
     pub fn get(&self) -> &V {
-        &self.locked_bucket.entry(&self.entry_ptr).1
+        self.locked_bucket.entry(&self.entry_ptr).1
     }
 
     /// Gets a mutable reference to the value in the entry.
@@ -1688,7 +1727,7 @@ where
     /// ```
     #[inline]
     pub unsafe fn get_mut(&mut self) -> &mut V {
-        &mut self.locked_bucket.entry_mut(&mut self.entry_ptr).1
+        self.locked_bucket.entry_mut(&mut self.entry_ptr).1
     }
 
     /// Gets the next closest occupied entry after removing the entry.
@@ -2101,7 +2140,7 @@ where
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Iter")
             .field("current_bucket_index", &self.index)
-            .field("current_index_in_bucket", &self.entry_ptr.index())
+            .field("current_position_in_bucket", &self.entry_ptr.pos())
             .finish()
     }
 }
@@ -2135,7 +2174,8 @@ where
             if let Some(bucket) = self.bucket.take() {
                 // Move to the next entry in the bucket.
                 if self.entry_ptr.find_next(bucket) {
-                    let (k, v) = self.entry_ptr.get(array.data_block(self.index));
+                    let k = self.entry_ptr.key(array.data_block(self.index));
+                    let v = self.entry_ptr.val(array.data_block(self.index));
                     self.bucket.replace(bucket);
                     return Some((k, v));
                 }

@@ -37,7 +37,7 @@ impl fmt::Display for RandomnessError {
     }
 }
 
-impl std::error::Error for RandomnessError {}
+impl ::core::error::Error for RandomnessError {}
 
 #[derive(
     Clone, Copy, PartialEq, Eq, Hash, ::rkyv::Archive, ::rkyv::Deserialize, ::rkyv::Serialize,
@@ -220,7 +220,7 @@ impl fmt::Display for SubjectError {
     }
 }
 
-impl std::error::Error for SubjectError {}
+impl ::core::error::Error for SubjectError {}
 
 impl ::serde::Serialize for Subject {
     #[inline]
@@ -250,7 +250,7 @@ impl<'de> ::serde::Deserialize<'de> for Subject {
     Clone, Copy, PartialEq, Eq, Hash, ::rkyv::Archive, ::rkyv::Serialize, ::rkyv::Deserialize,
 )]
 #[rkyv(derive(PartialEq, Eq, Hash))]
-#[repr(transparent)]
+#[repr(align(8))]
 pub struct UserId([u8; 16]);
 
 impl UserId {
@@ -274,6 +274,9 @@ impl UserId {
     #[inline]
     pub const fn to_bytes(self) -> [u8; 16] { self.0 }
 
+    #[inline]
+    pub const fn as_bytes(&self) -> &[u8; 16] { &self.0 }
+
     // ==================== 格式检测与字符串转换 ====================
 
     /// 检查是否为旧格式ID（高32位为0）
@@ -283,14 +286,14 @@ impl UserId {
         //                     index:         [0]      [1]       [2]       [3]
         // Memory layout (big-endian):    [最高32位][次高32位][次低32位][低32位]
         //                     index:         [0]       [1]       [2]      [3]
-        let parts = unsafe { core::mem::transmute::<[u8; 16], [u32; 4]>(self.0) };
+        let parts = unsafe { self.0.as_chunks_unchecked::<4>() };
 
         #[cfg(target_endian = "little")]
         const HIGH_INDEX: usize = 3;
         #[cfg(target_endian = "big")]
         const HIGH_INDEX: usize = 0;
 
-        parts[HIGH_INDEX] == 0
+        u32::from_ne_bytes(parts[HIGH_INDEX]) == 0
     }
 
     /// 高性能字符串转换，旧格式24字符，新格式31字符
@@ -376,9 +379,137 @@ impl<'de> ::serde::Deserialize<'de> for UserId {
 }
 
 const _: [u8; 16] = [0; core::mem::size_of::<UserId>()];
-const _: () = assert!(core::mem::align_of::<UserId>() == 1);
+const _: () = assert!(core::mem::align_of::<UserId>() <= 8);
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::rkyv::Archive, ::rkyv::Deserialize, ::rkyv::Serialize)]
+#[derive(Debug)]
+pub enum SessionIdError {
+    MissingSessionId,
+    InvalidFormat,
+    InvalidUlid,
+}
+
+impl fmt::Display for SessionIdError {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::MissingSessionId => "Missing session_id",
+            Self::InvalidFormat => "Invalid session_id format",
+            Self::InvalidUlid => "Invalid ULID",
+        })
+    }
+}
+
+impl ::core::error::Error for SessionIdError {}
+
+#[derive(
+    Clone, Copy, PartialEq, Eq, Hash, ::rkyv::Archive, ::rkyv::Serialize, ::rkyv::Deserialize,
+)]
+#[rkyv(derive(PartialEq, Eq, Hash))]
+#[repr(align(8))]
+pub struct SessionId([u8; 16]);
+
+impl SessionId {
+    const PREFIX: &'static str = "session_";
+
+    #[inline]
+    pub const fn empty() -> Self { Self([0; 16]) }
+
+    #[inline]
+    pub const fn is_empty(&self) -> bool {
+        let parts = unsafe { self.0.as_chunks_unchecked::<8>() };
+
+        #[cfg(target_endian = "little")]
+        const HIGH_INDEX: usize = 1;
+        #[cfg(target_endian = "big")]
+        const HIGH_INDEX: usize = 0;
+
+        u64::from_ne_bytes(parts[HIGH_INDEX]) == 0
+    }
+
+    /// 从 u128 构造
+    #[inline]
+    pub const fn from_u128(value: u128) -> Self { Self(value.to_ne_bytes()) }
+
+    /// 转换为 u128
+    #[inline]
+    pub const fn as_u128(self) -> u128 { u128::from_ne_bytes(self.0) }
+
+    /// 从字节数组构造
+    #[inline]
+    pub const fn from_bytes(bytes: [u8; 16]) -> Self { Self(bytes) }
+
+    /// 转换为字节数组
+    #[inline]
+    pub const fn to_bytes(self) -> [u8; 16] { self.0 }
+
+    #[inline]
+    pub const fn as_bytes(&self) -> &[u8; 16] { &self.0 }
+
+    /// 高性能字符串转换，34字符
+    #[allow(clippy::wrong_self_convention)]
+    #[inline]
+    pub fn to_str<'buf>(&self, buf: &'buf mut [u8; 34]) -> &'buf mut str {
+        unsafe {
+            core::ptr::copy_nonoverlapping(Self::PREFIX.as_ptr(), buf.as_mut_ptr(), 8);
+            ulid::to_str(self.as_u128(), &mut *(buf.as_mut_ptr().add(8) as *mut [u8; 26]));
+            core::str::from_utf8_unchecked_mut(buf)
+        }
+    }
+}
+
+impl core::fmt::Debug for SessionId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut buf = [0u8; 34];
+        let s = self.to_str(&mut buf);
+        f.debug_tuple("SessionId").field(&s).finish()
+    }
+}
+
+impl core::fmt::Display for SessionId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.to_str(&mut [0; 34]))
+    }
+}
+
+impl core::str::FromStr for SessionId {
+    type Err = SessionIdError;
+
+    fn from_str(s: &str) -> core::result::Result<Self, Self::Err> {
+        match s.len() {
+            34 => {
+                let id_str = s.strip_prefix(Self::PREFIX).ok_or(SessionIdError::InvalidFormat)?;
+                let id_array = unsafe { id_str.as_bytes().as_array().unwrap_unchecked() };
+                let id = ulid::from_bytes(id_array).map_err(|_| SessionIdError::InvalidUlid)?;
+                Ok(Self::from_u128(id))
+            }
+            _ => Err(SessionIdError::MissingSessionId),
+        }
+    }
+}
+
+impl ::serde::Serialize for SessionId {
+    #[inline]
+    fn serialize<S>(&self, serializer: S) -> core::result::Result<S::Ok, S::Error>
+    where S: ::serde::Serializer {
+        serializer.serialize_str(self.to_str(&mut [0; 34]))
+    }
+}
+
+impl<'de> ::serde::Deserialize<'de> for SessionId {
+    #[inline]
+    fn deserialize<D>(deserializer: D) -> core::result::Result<Self, D::Error>
+    where D: ::serde::Deserializer<'de> {
+        let s = String::deserialize(deserializer)?;
+        s.parse().map_err(::serde::de::Error::custom)
+    }
+}
+
+const _: [u8; 16] = [0; core::mem::size_of::<SessionId>()];
+const _: () = assert!(core::mem::align_of::<SessionId>() <= 8);
+
+#[derive(
+    Clone, Copy, PartialEq, Eq, Hash, ::rkyv::Archive, ::rkyv::Deserialize, ::rkyv::Serialize,
+)]
 pub struct Duration {
     pub start: i64,
     pub end: i64,
@@ -412,7 +543,7 @@ pub enum TokenError {
     InvalidSignatureLength,
 }
 
-impl std::error::Error for TokenError {}
+impl ::core::error::Error for TokenError {}
 
 impl fmt::Display for TokenError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -440,6 +571,8 @@ pub struct RawToken {
     pub randomness: Randomness,
     /// 会话
     pub is_session: bool,
+    /// 会话ID
+    pub workos_session_id: SessionId,
 }
 
 impl PartialEq for RawToken {
@@ -452,7 +585,8 @@ impl PartialEq for RawToken {
             self.subject == other.subject
                 && self.duration == other.duration
                 && self.randomness == other.randomness
-                && self.is_session == other.is_session,
+                && self.is_session == other.is_session
+                && self.workos_session_id == other.workos_session_id,
         )
     }
 }
@@ -472,13 +606,14 @@ impl ::core::hash::Hash for RawToken {
 
 impl RawToken {
     #[inline(always)]
-    fn to_token_payload(self) -> TokenPayload {
+    fn into_token_payload(self) -> TokenPayload {
         TokenPayload {
             sub: self.subject,
             time: Stringify(self.duration.start),
             exp: self.duration.end,
             randomness: self.randomness,
             is_session: self.is_session,
+            workos_session_id: self.workos_session_id,
         }
     }
 
@@ -490,6 +625,7 @@ impl RawToken {
             randomness: self.randomness,
             is_session: self.is_session,
             signature: self.signature,
+            workos_session_id: self.workos_session_id,
         }
     }
 
@@ -515,6 +651,7 @@ impl fmt::Debug for RawToken {
             .field("n", &self.randomness.0)
             .field("w", &self.is_web())
             .field("s", &self.signature)
+            .field("wsi", &self.workos_session_id.as_u128())
             .finish()
     }
 }
@@ -526,7 +663,7 @@ impl fmt::Display for RawToken {
             f,
             "{HEADER_B64}{}.{}",
             URL_SAFE_NO_PAD
-                .encode_to_string(__unwrap!(serde_json::to_vec(&self.to_token_payload()))),
+                .encode_to_string(__unwrap!(serde_json::to_vec(&self.into_token_payload()))),
             URL_SAFE_NO_PAD
                 .encode_as_str(&self.signature, base64_simd::Out::from_slice(&mut [0; 43]))
         )
@@ -575,6 +712,7 @@ impl FromStr for RawToken {
             randomness: payload.randomness,
             is_session: payload.is_session,
             signature: unsafe { signature.assume_init() },
+            workos_session_id: payload.workos_session_id,
         })
     }
 }
@@ -630,6 +768,7 @@ pub struct RawTokenHelper {
     pub duration: Duration,
     pub randomness: Randomness,
     pub is_session: bool,
+    pub workos_session_id: SessionId,
 }
 
 impl RawTokenHelper {
@@ -641,6 +780,7 @@ impl RawTokenHelper {
             randomness: self.randomness,
             is_session: self.is_session,
             signature: self.signature,
+            workos_session_id: self.workos_session_id,
         }
     }
 }

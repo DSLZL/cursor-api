@@ -2,14 +2,14 @@ use std::fmt;
 use std::ops::RangeBounds;
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed};
 
-use sdd::{AtomicShared, Guard, Ptr, Shared, Tag};
+use sdd::{AtomicShared, Ptr, Shared, Tag};
 
 use super::internal_node::InternalNode;
 use super::internal_node::Locker as InternalNodeLocker;
 use super::leaf::{InsertResult, Iter, Leaf, RemoveResult, RevIter};
 use super::leaf_node::LeafNode;
-use crate::Comparable;
 use crate::async_helper::LockPager;
+use crate::{Comparable, Guard};
 
 /// [`Node`] is either [`Self::Internal`] or [`Self::Leaf`].
 pub enum Node<K, V> {
@@ -26,10 +26,22 @@ impl<K, V> Node<K, V> {
         Self::Internal(InternalNode::new())
     }
 
+    /// Creates a new [`InternalNode`] in a frozen state.
+    #[inline]
+    pub(super) fn new_internal_node_frozen() -> Self {
+        Self::Internal(InternalNode::new_frozen())
+    }
+
     /// Creates a new [`LeafNode`].
     #[inline]
     pub(super) fn new_leaf_node() -> Self {
         Self::Leaf(LeafNode::new())
+    }
+
+    /// Creates a new [`LeafNode`] in a frozen state.
+    #[inline]
+    pub(super) fn new_leaf_node_frozen() -> Self {
+        Self::Leaf(LeafNode::new_frozen())
     }
 
     /// Returns the depth of the node.
@@ -47,15 +59,6 @@ impl<K, V> Node<K, V> {
         match &self {
             Self::Internal(internal_node) => internal_node.is_retired(),
             Self::Leaf(leaf_node) => leaf_node.is_retired(),
-        }
-    }
-
-    /// Freezes children nodes or leaves.
-    #[inline]
-    pub(super) fn freeze(&self) -> bool {
-        match &self {
-            Self::Internal(internal_node) => internal_node.children.freeze(),
-            Self::Leaf(leaf_node) => leaf_node.children.freeze(),
         }
     }
 }
@@ -88,6 +91,24 @@ where
         match &self {
             Self::Internal(internal_node) => internal_node.search_value(key, guard),
             Self::Leaf(leaf_node) => leaf_node.search_value(key, guard),
+        }
+    }
+
+    /// Reads an entry using the supplied closure.
+    #[inline]
+    pub fn read_entry<Q, R, F: FnOnce(&K, &V) -> R, P: LockPager>(
+        &self,
+        key: &Q,
+        reader: F,
+        pager: &mut P,
+        guard: &Guard,
+    ) -> Result<Option<R>, F>
+    where
+        Q: Comparable<K> + ?Sized,
+    {
+        match &self {
+            Self::Internal(internal_node) => internal_node.read_entry(key, reader, pager, guard),
+            Self::Leaf(leaf_node) => leaf_node.read_entry(key, reader, pager, guard),
         }
     }
 
@@ -265,8 +286,10 @@ where
                 break;
             }
 
-            let locker = match pager.try_acquire(&internal_node.lock) {
-                Ok(true) => InternalNodeLocker { internal_node },
+            let locker = match pager.try_acquire::<false>(&internal_node.lock) {
+                Ok(true) => InternalNodeLocker {
+                    node: internal_node,
+                },
                 Ok(false) => {
                     // The root was retired.
                     continue;

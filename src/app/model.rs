@@ -57,8 +57,8 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 pub use state::{AppState, QueueType, TokenError, TokenHealth, TokenManager, TokenWriter};
 pub use token::{
-    Duration as TokenDuration, Randomness, RawToken, RawTokenHelper, Subject, Token, TokenKey,
-    UserId,
+    Duration as TokenDuration, Randomness, RawToken, RawTokenHelper, SessionId, Subject, Token,
+    TokenKey, UserId,
 };
 pub use tz::DateTime;
 pub use usage_check::UsageCheck;

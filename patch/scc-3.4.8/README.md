@@ -7,6 +7,7 @@ A collection of high-performance asynchronous/concurrent containers with both as
 
 #### Features
 
+- Leverages the PAX storage format for optimized read/write performance.
 - Provides both asynchronous and synchronous interfaces.
 - SIMD lookup to scan multiple entries in parallel: requires `RUSTFLAGS='-C target_feature=+avx2'` on `x86_64`.
 - [`Equivalent`](https://github.com/indexmap-rs/equivalent), [`Loom`](https://github.com/tokio-rs/loom) and [`Serde`](https://github.com/serde-rs/serde) support: `features = ["equivalent", "loom", "serde"]`.
@@ -159,19 +160,26 @@ The `HashIndex` does not drop removed entries immediately; instead, they are dro
 
 ### Examples
 
-The `peek` and `peek_with` methods are completely lock-free.
+The `peek` and `peek_with` methods are completely lock-free, whereas `read_async` and `read_sync` are not.
 
 ```rust
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering::Relaxed;
+
 use scc::HashIndex;
 
-let hashindex: HashIndex<u64, u32> = HashIndex::default();
+let hashindex: HashIndex<usize, AtomicUsize> = HashIndex::default();
 
-assert!(hashindex.insert_sync(1, 0).is_ok());
+assert!(hashindex.insert_sync(1, AtomicUsize::new(1)).is_ok());
+
+// `read_async` and `read_sync` acquire a shared lock on the bucket, thereby
+// allowing safe modification of values through interior mutability.
+assert_eq!(hashindex.read_sync(&1, |_, v| v.fetch_add(3, Relaxed)), Some(1));
 
 // `peek` and `peek_with` are lock-free.
-assert_eq!(hashindex.peek_with(&1, |_, v| *v).unwrap(), 0);
+assert_eq!(hashindex.peek_with(&1, |_, v| v.load(Relaxed)), Some(4));
 
-let future_insert = hashindex.insert_async(2, 1);
+let future_insert = hashindex.insert_async(2, AtomicUsize::new(1));
 let future_remove = hashindex.remove_if_async(&1, |_| true);
 ```
 
@@ -197,9 +205,7 @@ if let Some(mut o) = hashindex.get_sync(&1) {
 An [`Iterator`](https://doc.rust-lang.org/std/iter/trait.Iterator.html) is implemented for [`HashIndex`](#hashindex).
 
 ```rust
-use scc::HashIndex;
-
-use sdd::Guard;
+use scc::{Guard, HashIndex};
 
 let hashindex: HashIndex<u64, u32> = HashIndex::default();
 
@@ -250,7 +256,7 @@ assert_eq!(hashcache.remove_sync(&2).unwrap(), (2, 0));
 
 ### Locking behavior
 
-Read access is always lock-free and non-blocking. Write access to an entry is lock-free and non-blocking as long as no structural changes are required. However, when nodes are split or merged by a write operation, other write operations on keys in the affected range are blocked.
+Read access is lock-free and non-blocking with an exception; `read_async` and `read_sync` operations acquire a shared lock on the target leaf node. Write access to an entry is lock-free and non-blocking as long as no structural changes are required. However, when nodes are split or merged by a write operation, other write operations on keys in the affected range are blocked.
 
 ### Entry lifetime
 
@@ -258,29 +264,34 @@ Read access is always lock-free and non-blocking. Write access to an entry is lo
 
 ### Examples
 
-Locks are acquired or awaited when internal nodes are split or merged, however blocking operations do not affect read operations.
+Locks are acquired or awaited when internal nodes are split or merged, however blocking operations do not affect lock-free read operations.
 
 ```rust
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering::Relaxed;
+
 use scc::TreeIndex;
 
-let treeindex: TreeIndex<u64, u32> = TreeIndex::new();
+let treeindex: TreeIndex<usize, AtomicUsize> = TreeIndex::new();
 
-assert!(treeindex.insert_sync(1, 2).is_ok());
+assert!(treeindex.insert_sync(1, AtomicUsize::new(2)).is_ok());
+
+// `read_async` and `read_sync` acquire a shared lock on the leaf node, thereby
+// allowing safe modification of values through interior mutability.
+assert_eq!(treeindex.read_sync(&1, |_, v| v.fetch_add(3, Relaxed)), Some(2));
 
 // `peek` and `peek_with` are lock-free.
-assert_eq!(treeindex.peek_with(&1, |_, v| *v).unwrap(), 2);
+assert_eq!(treeindex.peek_with(&1, |_, v| v.load(Relaxed)), Some(5));
 assert!(treeindex.remove_sync(&1));
 
-let future_insert = treeindex.insert_async(2, 3);
-let future_remove = treeindex.remove_if_async(&1, |v| *v == 2);
+let future_insert = treeindex.insert_async(2, AtomicUsize::new(3));
+let future_remove = treeindex.remove_if_async(&1, |v| v.load(Relaxed) == 2);
 ```
 
 Entries can be scanned without acquiring any locks.
 
 ```rust
-use scc::TreeIndex;
-
-use sdd::Guard;
+use scc::{Guard, TreeIndex};
 
 let treeindex: TreeIndex<u64, u32> = TreeIndex::new();
 
@@ -301,9 +312,7 @@ assert!(iter.next().is_none());
 A specific range of keys can be scanned.
 
 ```rust
-use scc::TreeIndex;
-
-use sdd::Guard;
+use scc::{Guard, TreeIndex};
 
 let treeindex: TreeIndex<u64, u32> = TreeIndex::new();
 

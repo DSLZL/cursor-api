@@ -31,7 +31,7 @@
 use core::fmt;
 use core::time::Duration;
 
-use rand::Rng as _;
+use rand::RngExt as _;
 
 /// Defines the display format for duration formatting.
 ///

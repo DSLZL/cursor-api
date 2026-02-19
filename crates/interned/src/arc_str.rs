@@ -181,7 +181,7 @@ impl ArcStr {
 
                 // 将新创建的字符串加入全局池
                 // 使用 from_key_hashed_nocheck 避免重复计算哈希
-                entry.insert(ThreadSafePtr(ptr), ());
+                entry.insert_hashed_nocheck(hash, ThreadSafePtr(ptr), ());
 
                 Self { ptr, _marker: PhantomData }
             }

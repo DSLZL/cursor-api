@@ -14,12 +14,12 @@ use std::sync::atomic::Ordering::Relaxed;
 
 #[cfg(feature = "loom")]
 use loom::sync::atomic::AtomicUsize;
-use sdd::{AtomicShared, Guard, Shared, Tag};
+use sdd::{AtomicShared, Shared, Tag};
 
-use super::Equivalent;
 use super::hash_table::bucket::{EntryPtr, MAP};
 use super::hash_table::bucket_array::BucketArray;
 use super::hash_table::{HashTable, LockedBucket};
+use super::{Equivalent, Guard};
 
 /// Scalable asynchronous/concurrent hash map.
 ///
@@ -735,12 +735,10 @@ where
     pub async fn replace_async(&self, key: K) -> ReplaceResult<'_, K, V, H> {
         let hash = self.hash(&key);
         let locked_bucket = self.writer_async(hash).await;
-        let mut entry_ptr = locked_bucket.search(&key, hash);
+        let entry_ptr = locked_bucket.search(&key, hash);
         if entry_ptr.is_valid() {
             let prev_key = replace(
-                &mut entry_ptr
-                    .get_mut(locked_bucket.data_block, &locked_bucket.writer)
-                    .0,
+                unsafe { entry_ptr.key_ptr(locked_bucket.data_block).as_mut() },
                 key,
             );
             ReplaceResult::Replaced(
@@ -807,12 +805,10 @@ where
     pub fn replace_sync(&self, key: K) -> ReplaceResult<'_, K, V, H> {
         let hash = self.hash(&key);
         let locked_bucket = self.writer_sync(hash);
-        let mut entry_ptr = locked_bucket.search(&key, hash);
+        let entry_ptr = locked_bucket.search(&key, hash);
         if entry_ptr.is_valid() {
             let prev_key = replace(
-                &mut entry_ptr
-                    .get_mut(locked_bucket.data_block, &locked_bucket.writer)
-                    .0,
+                unsafe { entry_ptr.key_ptr(locked_bucket.data_block).as_mut() },
                 key,
             );
             ReplaceResult::Replaced(
@@ -902,7 +898,7 @@ where
         let hash = self.hash(key);
         let mut locked_bucket = self.optional_writer_async(hash).await?;
         let mut entry_ptr = locked_bucket.search(key, hash);
-        if entry_ptr.is_valid() && condition(&mut locked_bucket.entry_mut(&mut entry_ptr).1) {
+        if entry_ptr.is_valid() && condition(locked_bucket.entry_mut(&mut entry_ptr).1) {
             Some(locked_bucket.remove(self, &mut entry_ptr))
         } else {
             None
@@ -936,7 +932,7 @@ where
         let hash = self.hash(key);
         let mut locked_bucket = self.optional_writer_sync(hash)?;
         let mut entry_ptr = locked_bucket.search(key, hash);
-        if entry_ptr.is_valid() && condition(&mut locked_bucket.entry_mut(&mut entry_ptr).1) {
+        if entry_ptr.is_valid() && condition(locked_bucket.entry_mut(&mut entry_ptr).1) {
             Some(locked_bucket.remove(self, &mut entry_ptr))
         } else {
             None
@@ -1126,8 +1122,7 @@ where
         self.for_each_reader_async(|reader, data_block| {
             let mut entry_ptr = EntryPtr::null();
             while entry_ptr.find_next(&reader) {
-                let (k, v) = entry_ptr.get(data_block);
-                if !f(k, v) {
+                if !f(entry_ptr.key(data_block), entry_ptr.val(data_block)) {
                     result = false;
                     return false;
                 }
@@ -1169,8 +1164,7 @@ where
         self.for_each_reader_sync(&guard, |reader, data_block| {
             let mut entry_ptr = EntryPtr::null();
             while entry_ptr.find_next(&reader) {
-                let (k, v) = entry_ptr.get(data_block);
-                if !f(k, v) {
+                if !f(entry_ptr.key(data_block), entry_ptr.val(data_block)) {
                     result = false;
                     return false;
                 }
@@ -1195,9 +1189,9 @@ where
     /// assert!(hashmap.insert_sync(2, 1).is_ok());
     ///
     /// async {
-    ///     let result = hashmap.iter_mut_async(|entry| {
-    ///         if entry.0 == 1 {
-    ///             entry.consume();
+    ///     let result = hashmap.iter_mut_async(|e| {
+    ///         if *e.key() == 1 {
+    ///             e.consume();
     ///             return false;
     ///         }
     ///         true
@@ -1247,9 +1241,9 @@ where
     /// assert!(hashmap.insert_sync(2, 1).is_ok());
     /// assert!(hashmap.insert_sync(3, 2).is_ok());
     ///
-    /// let result = hashmap.iter_mut_sync(|entry| {
-    ///     if entry.0 == 1 {
-    ///         entry.consume();
+    /// let result = hashmap.iter_mut_sync(|e| {
+    ///     if *e.key() == 1 {
+    ///         e.consume();
     ///         return false;
     ///     }
     ///     true
@@ -1302,8 +1296,8 @@ where
     #[inline]
     pub async fn retain_async<F: FnMut(&K, &mut V) -> bool>(&self, mut pred: F) {
         self.iter_mut_async(|mut e| {
-            let (k, v) = &mut *e;
-            if !pred(k, v) {
+            let k = e.entry_ptr.key(e.locked_bucket.data_block);
+            if !pred(k, &mut *e) {
                 drop(e.consume());
             }
             true
@@ -1339,8 +1333,8 @@ where
     #[inline]
     pub fn retain_sync<F: FnMut(&K, &mut V) -> bool>(&self, mut pred: F) {
         self.iter_mut_sync(|mut e| {
-            let (k, v) = &mut *e;
-            if !pred(k, v) {
+            let k = e.entry_ptr.key(e.locked_bucket.data_block);
+            if !pred(k, &mut *e) {
                 drop(e.consume());
             }
             true
@@ -1867,7 +1861,7 @@ where
     #[inline]
     #[must_use]
     pub fn key(&self) -> &K {
-        &self.locked_bucket.entry(&self.entry_ptr).0
+        self.locked_bucket.entry(&self.entry_ptr).0
     }
 
     /// Takes ownership of the key and value from the [`HashMap`].
@@ -1911,7 +1905,7 @@ where
     #[inline]
     #[must_use]
     pub fn get(&self) -> &V {
-        &self.locked_bucket.entry(&self.entry_ptr).1
+        self.locked_bucket.entry(&self.entry_ptr).1
     }
 
     /// Gets a mutable reference to the value in the entry.
@@ -1935,7 +1929,7 @@ where
     /// ```
     #[inline]
     pub fn get_mut(&mut self) -> &mut V {
-        &mut self.locked_bucket.entry_mut(&mut self.entry_ptr).1
+        self.locked_bucket.entry_mut(&mut self.entry_ptr).1
     }
 
     /// Sets the value of the entry, and returns the old value.
@@ -2281,15 +2275,16 @@ impl<K, V> ConsumableEntry<'_, K, V> {
     ///
     /// let mut consumed = None;
     ///
-    /// hashmap.iter_mut_sync(|entry| {
-    ///     if entry.0 == 1 {
-    ///         consumed.replace(entry.consume().1);
+    /// hashmap.iter_mut_sync(|mut e| {
+    ///     if *e.key() == 1 {
+    ///         *e = 2;
+    ///         consumed.replace(e.consume().1);
     ///     }
     ///     true
     /// });
     ///
     /// assert!(!hashmap.contains_sync(&1));
-    /// assert_eq!(consumed, Some(0));
+    /// assert_eq!(consumed, Some(2));
     /// ```
     #[inline]
     #[must_use]
@@ -2299,21 +2294,51 @@ impl<K, V> ConsumableEntry<'_, K, V> {
             .writer
             .remove(self.locked_bucket.data_block, self.entry_ptr)
     }
+
+    /// Returns a reference to the key.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use scc::HashMap;
+    ///
+    /// let hashmap: HashMap<u64, u32> = HashMap::default();
+    ///
+    /// assert!(hashmap.insert_sync(1, 0).is_ok());
+    /// assert!(hashmap.insert_sync(2, 1).is_ok());
+    /// assert!(hashmap.insert_sync(3, 2).is_ok());
+    ///
+    /// hashmap.iter_mut_sync(|mut e| {
+    ///     if *e.key() == 1 {
+    ///         assert_eq!(*e, 0);
+    ///     }
+    ///     true
+    /// });
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn key(&self) -> &K {
+        self.entry_ptr.key(self.locked_bucket.data_block)
+    }
 }
 
 impl<K, V> Deref for ConsumableEntry<'_, K, V> {
-    type Target = (K, V);
+    type Target = V;
 
     #[inline]
     fn deref(&self) -> &Self::Target {
-        self.locked_bucket.entry(self.entry_ptr)
+        self.entry_ptr.val(self.locked_bucket.data_block)
     }
 }
 
 impl<K, V> DerefMut for ConsumableEntry<'_, K, V> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.locked_bucket.entry_mut(self.entry_ptr)
+        unsafe {
+            self.entry_ptr
+                .val_ptr(self.locked_bucket.data_block)
+                .as_mut()
+        }
     }
 }
 

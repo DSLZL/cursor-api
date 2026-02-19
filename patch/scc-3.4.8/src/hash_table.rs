@@ -10,16 +10,17 @@ use std::ptr::{self, NonNull, from_ref};
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 
-use bucket::{BUCKET_LEN, CACHE, DataBlock, EntryPtr, INDEX, LruList, Reader, Writer};
+use bucket::{BUCKET_LEN, CACHE, EntryPtr, INDEX, LruList, Reader, Writer};
 use bucket_array::BucketArray;
 #[cfg(feature = "loom")]
 use loom::sync::atomic::AtomicUsize;
-use sdd::{AtomicShared, Guard, Ptr, Shared, Tag};
+use sdd::{AtomicShared, Ptr, Shared, Tag};
 
-use super::Equivalent;
 use super::async_helper::AsyncGuard;
+use super::data_block::DataBlock;
 use super::exit_guard::ExitGuard;
 use super::hash_table::bucket::Bucket;
+use super::{Equivalent, Guard};
 
 /// `HashTable` defines common functions for hash table implementations.
 pub(super) trait HashTable<K, V, H, L: LruList, const TYPE: char>
@@ -219,7 +220,7 @@ where
 
     /// Peeks an entry from the [`HashTable`].
     #[inline]
-    fn peek_entry<'g, Q>(&self, key: &Q, guard: &'g Guard) -> Option<&'g (K, V)>
+    fn peek_entry<'g, Q>(&self, key: &Q, guard: &'g Guard) -> Option<(&'g K, &'g V)>
     where
         Q: Equivalent<K> + Hash + ?Sized,
     {
@@ -290,7 +291,7 @@ where
                 if let Some(entry) =
                     reader.search_entry(current_array.data_block(bucket_index), key, hash)
                 {
-                    return Some(f(&entry.0, &entry.1));
+                    return Some(f(entry.0, entry.1));
                 }
                 break;
             }
@@ -318,7 +319,7 @@ where
             if let Some(reader) = Reader::lock_sync(bucket) {
                 if let Some(entry) = reader.search_entry(current_array.data_block(index), key, hash)
                 {
-                    return Some(f(&entry.0, &entry.1));
+                    return Some(f(entry.0, entry.1));
                 }
                 break;
             }
@@ -1015,7 +1016,7 @@ where
             let (offset, hash) = if old_array.len() >= current_array.len() {
                 (0, u64::from(entry_ptr.partial_hash(&**old_writer)))
             } else {
-                let hash = self.hash(&entry_ptr.get_mut(old_data_block, old_writer).0);
+                let hash = self.hash(unsafe { entry_ptr.key_ptr(old_data_block).as_ref() });
                 let new_index = current_array.bucket_index(hash);
                 debug_assert!(new_index - target_index < (current_array.len() / old_array.len()));
                 (new_index - target_index, hash)
@@ -1064,7 +1065,7 @@ where
             let hash = if old_array.len() >= current_array.len() {
                 u64::from(entry_ptr.partial_hash(&**old_writer))
             } else if position == BUCKET_LEN {
-                self.hash(&entry_ptr.get(old_data_block).0)
+                self.hash(unsafe { entry_ptr.key_ptr(old_data_block).as_ref() })
             } else {
                 position += 1;
                 hash_data[position - 1]
@@ -1448,8 +1449,13 @@ impl<K, V, L: LruList, const TYPE: char> LockedBucket<K, V, L, TYPE> {
 
     /// Gets a mutable reference to the entry.
     #[inline]
-    pub(crate) fn entry(&self, entry_ptr: &EntryPtr<K, V, TYPE>) -> &(K, V) {
-        entry_ptr.get(self.data_block)
+    pub(crate) fn entry(&self, entry_ptr: &EntryPtr<K, V, TYPE>) -> (&K, &V) {
+        unsafe {
+            (
+                entry_ptr.key_ptr(self.data_block).as_ref(),
+                entry_ptr.val_ptr(self.data_block).as_ref(),
+            )
+        }
     }
 
     /// Gets a mutable reference to the entry.
@@ -1457,8 +1463,13 @@ impl<K, V, L: LruList, const TYPE: char> LockedBucket<K, V, L, TYPE> {
     pub(crate) fn entry_mut<'b>(
         &'b mut self,
         entry_ptr: &'b mut EntryPtr<K, V, TYPE>,
-    ) -> &'b mut (K, V) {
-        entry_ptr.get_mut(self.data_block, &self.writer)
+    ) -> (&'b mut K, &'b mut V) {
+        unsafe {
+            (
+                entry_ptr.key_ptr(self.data_block).as_mut(),
+                entry_ptr.val_ptr(self.data_block).as_mut(),
+            )
+        }
     }
 
     /// Inserts a new entry with the supplied constructor function.

@@ -49,11 +49,15 @@ impl Detail {
         let s = <String as ::serde::Deserialize>::deserialize(deserializer)?;
         match base64_simd::STANDARD_NO_PAD.decode_to_vec(s) {
             Ok(buf) => aiserver::v1::ErrorDetails::decode(&buf[..]).map_err(|e| {
+                __cold_path!();
                 serde::de::Error::custom(format_args!(
                     "failed to decode from Base64-decoded bytes: {e}"
                 ))
             }),
-            Err(e) => Err(serde::de::Error::custom(format_args!("invalid Base64 string: {e}"))),
+            Err(e) => {
+                __cold_path!();
+                Err(serde::de::Error::custom(format_args!("invalid Base64 string: {e}")))
+            }
         }
     }
 }

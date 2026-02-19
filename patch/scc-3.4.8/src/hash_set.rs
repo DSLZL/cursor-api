@@ -219,7 +219,7 @@ where
         let mut locked_bucket = self.map.writer_async(hash).await;
         let mut entry_ptr = locked_bucket.search(&key, hash);
         if entry_ptr.is_valid() {
-            let k = &mut locked_bucket.entry_mut(&mut entry_ptr).0;
+            let k = locked_bucket.entry_mut(&mut entry_ptr).0;
             swap(k, &mut key);
             Some(key)
         } else {
@@ -272,7 +272,7 @@ where
         let mut locked_bucket = self.map.writer_sync(hash);
         let mut entry_ptr = locked_bucket.search(&key, hash);
         if entry_ptr.is_valid() {
-            let k = &mut locked_bucket.entry_mut(&mut entry_ptr).0;
+            let k = locked_bucket.entry_mut(&mut entry_ptr).0;
             swap(k, &mut key);
             Some(key)
         } else {
@@ -530,9 +530,9 @@ where
     /// assert!(hashset.insert_sync(2).is_ok());
     ///
     /// async {
-    ///     let result = hashset.iter_mut_async(|entry| {
-    ///         if *entry == 1 {
-    ///             entry.consume();
+    ///     let result = hashset.iter_mut_async(|e| {
+    ///         if *e == 1 {
+    ///             e.consume();
     ///             return false;
     ///         }
     ///         true
@@ -565,9 +565,9 @@ where
     /// assert!(hashset.insert_sync(2).is_ok());
     /// assert!(hashset.insert_sync(3).is_ok());
     ///
-    /// let result = hashset.iter_mut_sync(|entry| {
-    ///     if *entry == 1 {
-    ///         entry.consume();
+    /// let result = hashset.iter_mut_sync(|e| {
+    ///     if *e == 1 {
+    ///         e.consume();
     ///         return false;
     ///     }
     ///     true
@@ -622,7 +622,7 @@ where
     #[inline]
     pub fn retain_sync<F: FnMut(&K) -> bool>(&self, mut pred: F) {
         self.iter_mut_sync(|e| {
-            if !pred(&e) {
+            if !pred(&*e) {
                 drop(e.consume());
             }
             true
@@ -921,9 +921,9 @@ impl<K> ConsumableEntry<'_, K> {
     ///
     /// let mut consumed = None;
     ///
-    /// hashset.iter_mut_sync(|entry| {
-    ///     if *entry == 1 {
-    ///         consumed.replace(entry.consume());
+    /// hashset.iter_mut_sync(|e| {
+    ///     if *e == 1 {
+    ///         consumed.replace(e.consume());
     ///     }
     ///     true
     /// });
@@ -943,6 +943,6 @@ impl<K> Deref for ConsumableEntry<'_, K> {
 
     #[inline]
     fn deref(&self) -> &Self::Target {
-        &self.consumable.0
+        self.consumable.key()
     }
 }

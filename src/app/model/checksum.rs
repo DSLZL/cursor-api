@@ -23,7 +23,7 @@ impl fmt::Display for ChecksumError {
     }
 }
 
-impl std::error::Error for ChecksumError {}
+impl ::core::error::Error for ChecksumError {}
 
 impl From<HashError> for ChecksumError {
     #[inline]

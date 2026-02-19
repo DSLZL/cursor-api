@@ -48,8 +48,8 @@ impl std::fmt::Display for NtpError {
     }
 }
 
-impl std::error::Error for NtpError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl ::core::error::Error for NtpError {
+    fn source(&self) -> Option<&(dyn ::core::error::Error + 'static)> {
         match self {
             NtpError::Io(e) => Some(e),
             _ => None,

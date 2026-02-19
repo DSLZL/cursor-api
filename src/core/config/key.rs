@@ -80,6 +80,9 @@ pub mod configured_key {
             /// 是否为会话令牌
             #[n(6)]
             pub is_session: bool,
+            /// WorkOS会话ID(\[u8; 16\])
+            #[n(7)]
+            pub workos_session_id: [u8; 16],
         }
     }
 

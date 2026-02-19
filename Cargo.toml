@@ -14,7 +14,7 @@ members = [
 default-members = ["."]
 
 [workspace.package]
-version = "0.4.0-pre.22"
+version = "0.4.0-pre.23"
 edition = "2024"
 authors = ["wisdgod <nav@wisdgod.com>"]
 description = "A format compatibility layer for the Cursor API"
@@ -68,7 +68,8 @@ prost = { path = "patch/prost-0.14.1" }
 # prost-types = { path = "patch/prost-types" }
 scc = { path = "patch/scc-3.4.8" }
 vsimd = { path = "patch/vsimd-0.8.0" }
-lzma-rust2 = { path = "patch/lzma-rust2-0.15.7" }
+lzma-rust2 = { path = "patch/lzma-rust2-0.16.2" }
+uuid = { path = "patch/uuid-1.21.0" }
 
 # ===========================================
 
@@ -94,7 +95,7 @@ __build = { package = "cursor-api-build", path = "crates/__build" }
 
 # chrono = { version = "0.4", default-features = false, features = ["alloc"] }
 # prost-build = { version = "0.14", optional = true }
-sha2 = { version = "0.11.0-rc.4", default-features = false }
+sha2 = { version = "0.11.0-rc.5", default-features = false }
 serde_json = "1"
 
 [dependencies]
@@ -146,7 +147,7 @@ hashbrown = { version = "0.16", default-features = false, features = [
     "inline-more",
 ] }
 hex = { version = "0.4", default-features = false, features = ["std"] }
-hmac = "0.13.0-rc.4"
+hmac = "0.13.0-rc.5"
 http = "1"
 http-body = "1"
 http-body-util = "0.1"
@@ -173,7 +174,7 @@ phf = { version = "0.13", features = ["macros"] }
 # pin-project = "1"
 prost = { version = "0.14", features = [] }
 # prost-types = "0.14"
-rand = { version = "0.9", default-features = false, features = ["thread_rng"] }
+rand = { version = "0.10", default-features = false, features = ["thread_rng"] }
 reqwest = { version = "0.13", default-features = false, features = [
     "gzip",
     "brotli",
@@ -205,7 +206,7 @@ serde = { version = "1", default-features = false, features = [
 ] }
 # serde_json = { package = "sonic-rs", version = "0" }
 serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
-sha2 = { version = "0.11.0-rc.4", default-features = false }
+sha2 = { version = "0.11.0-rc.5", default-features = false }
 sysinfo = { version = "0.38", default-features = false, features = ["system"] }
 tokio = { version = "1", features = [
     "fs",
@@ -221,7 +222,7 @@ tokio = { version = "1", features = [
 # tokio-util = { version = "0.7", features = [] }
 # tokio-tungstenite = { version = "0.26.2", features = ["rustls-tls-webpki-roots"] }
 tokio-stream = { version = "0.1", default-features = false, features = [] }
-toml = { version = "0.9.8", default-features = false, features = [
+toml = { version = "1.0", default-features = false, features = [
     "serde",
     "parse",
 ] }
@@ -236,12 +237,12 @@ tracing = { version = "*", default-features = false, features = [
 #     "env-filter",
 # ] }
 url = { version = "2.5", default-features = false, features = ["serde"] }
-uuid = { version = "1.14", default-features = false, features = [
+uuid = { version = "1.21", default-features = false, features = [
     "v4",
     "fast-rng",
     "serde",
 ] }
-zip = { version = "7", default-features = false, features = [
+zip = { version = "8", default-features = false, features = [
     "deflate-flate2-zlib-rs",
     "bzip2",
     "deflate64",

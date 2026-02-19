@@ -3,6 +3,50 @@
 
 ## Version 3
 
+3.6.4
+
+* Minor `TreeIndex::remove_range_{async, sync}` optimization.
+* More robust `OOM` handling.
+
+3.6.3
+
+* Update dependencies.
+
+3.6.2
+
+* Stabilize `{HashIndex, TreeIndex}::read_{async, sync}`.
+
+3.6.1
+
+* Add `{HashIndex, TreeIndex}::read_{async, sync}` for shared-lock-protected access to entries.
+
+3.6.0
+
+* *Breaking change / API update*.
+
+  * `{HashMap, HashCache}::ConsumableEntry` returns key and value references separately to prevent accidental key field modification.
+  * `{HashMap, HashCache}::iter_mut_{async, sync}` methods are affected by the breaking change.
+  * Example:
+    ```rust
+    use scc::HashMap;
+    
+    let hashmap: HashMap<u64, u32> = HashMap::default();
+    assert!(hashmap.insert_sync(1, 0).is_ok());
+    let mut consumed = None;
+    hashmap.iter_mut_sync(|mut e| {
+        if *e.key() == 1 { // Previously, `e.0 == 1`.
+            *e = 3; // Previously, `e.1 = 3`.
+            // Previously, `e.0 = 0` was allowed: !unsafe!.
+            consumed.replace(e.consume().1);
+        }
+        true
+    });
+    assert_eq!(consumed, Some(3));
+    ```
+  
+* Update the storage format of `Hash*` containers for better memory utilization: `K` and `V` are stored separately.
+* Minor `TreeIndex::insert_*` performance improvement.
+
 3.5.6
 
 * Add support for `MIRIFLAGS="-Zmiri-strict-provenance"`.

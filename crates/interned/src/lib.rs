@@ -1,4 +1,3 @@
-#![feature(cold_path)]
 #![feature(const_trait_impl)]
 #![feature(const_convert)]
 #![feature(const_cmp)]
