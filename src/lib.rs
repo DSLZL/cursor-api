@@ -18,8 +18,8 @@ impl<T, E> UnwrapUnchecked<T> for Result<T, E> {
 }
 
 #[cfg(debug_assertions)]
-#[macro_export]
 #[doc(hidden)]
+#[macro_export]
 macro_rules! __unwrap {
     ($expr:expr) => {
         $expr.unwrap()
@@ -27,16 +27,16 @@ macro_rules! __unwrap {
 }
 
 #[cfg(not(debug_assertions))]
-#[macro_export]
 #[doc(hidden)]
+#[macro_export]
 macro_rules! __unwrap {
     ($expr:expr) => {
         $crate::UnwrapUnchecked::unwrap_unchecked($expr)
     };
 }
 
-#[macro_export]
 #[doc(hidden)]
+#[macro_export]
 macro_rules! __unwrap_panic {
     ($result:expr) => {
         match $result {
@@ -46,13 +46,13 @@ macro_rules! __unwrap_panic {
     };
 }
 
+#[doc(hidden)]
 #[inline(never)]
 #[cold]
-#[doc(hidden)]
 pub fn __panic(error: &dyn ::core::fmt::Display) -> ! { ::core::panic!("{error}") }
 
-#[macro_export]
 #[doc(hidden)]
+#[macro_export]
 macro_rules! __unreachable {
     () => {{
         #[cfg(debug_assertions)]
@@ -66,9 +66,9 @@ macro_rules! __unreachable {
     }};
 }
 
+#[doc(hidden)]
 #[allow_internal_unstable(cold_path)]
 #[macro_export]
-#[doc(hidden)]
 macro_rules! __cold_path {
     () => {
         ::core::hint::cold_path()
@@ -81,16 +81,16 @@ pub const LF: &[u8] = b"\n";
 #[cfg(windows)]
 pub const LF: &[u8] = b"\r\n";
 
-#[macro_export]
 #[doc(hidden)]
+#[macro_export]
 macro_rules! __print {
     ($expr:expr) => {
         $crate::_print($expr.as_bytes())
     };
 }
 
-#[macro_export]
 #[doc(hidden)]
+#[macro_export]
 macro_rules! __println {
     () => {
         $crate::_print($crate::LF)
@@ -100,16 +100,16 @@ macro_rules! __println {
     };
 }
 
-#[macro_export]
 #[doc(hidden)]
+#[macro_export]
 macro_rules! __eprint {
     ($expr:expr) => {
         $crate::_eprint($expr.as_bytes())
     };
 }
 
-#[macro_export]
 #[doc(hidden)]
+#[macro_export]
 macro_rules! __eprintln {
     () => {
         $crate::_eprint($crate::LF)
@@ -234,4 +234,36 @@ macro_rules! define_valid_range_type {
             }
         }
     )+};
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __impl_deref {
+    ($ident:ident) => {
+        impl<T> std::ops::Deref for $ident<T> {
+            type Target = T;
+
+            #[inline]
+            fn deref(&self) -> &Self::Target { &self.0 }
+        }
+
+        impl<T> std::ops::DerefMut for $ident<T> {
+            #[inline]
+            fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 }
+        }
+    };
+
+    ($ident:ident: $ty:ty) => {
+        impl std::ops::Deref for $ident {
+            type Target = $ty;
+
+            #[inline]
+            fn deref(&self) -> &Self::Target { &self.0 }
+        }
+
+        impl std::ops::DerefMut for $ident {
+            #[inline]
+            fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 }
+        }
+    };
 }

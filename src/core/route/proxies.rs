@@ -1,13 +1,16 @@
 use crate::{
-    app::model::{
-        CommonResponse, ProxiesDeleteRequest, ProxiesDeleteResponse, ProxyAddRequest,
-        ProxyInfoResponse, ProxyUpdateRequest, SetGeneralProxyRequest,
-        proxy_pool::{self, Proxies},
+    app::{
+        model::{
+            CommonResponse, ProxiesDeleteRequest, ProxiesDeleteResponse, ProxyAddRequest,
+            ProxyInfoResponse, ProxyUpdateRequest, SetGeneralProxyRequest,
+            proxy_pool::{self, Proxies},
+        },
+        route::{GenericJson, InfallibleJson},
     },
     common::model::{ApiStatus, GenericError},
 };
 use alloc::{borrow::Cow, sync::Arc};
-use axum::{Json, http::StatusCode};
+use http::StatusCode;
 use interned::Str;
 
 type HashMap<K, V> = hashbrown::HashMap<K, V, ahash::RandomState>;
@@ -33,14 +36,14 @@ fn format_save_proxy_config_error(
 }
 
 // 获取所有代理配置
-pub async fn handle_get_proxies() -> Json<ProxyInfoResponse> {
+pub async fn handle_get_proxies() -> InfallibleJson<ProxyInfoResponse> {
     // 获取代理配置并立即释放锁
     let proxies = proxy_pool::proxies().load_full();
 
     let proxies_count = proxies.len();
     let general_proxy = proxy_pool::general_name().load_full();
 
-    Json(ProxyInfoResponse {
+    InfallibleJson(ProxyInfoResponse {
         status: ApiStatus::Success,
         proxies: Some(proxies),
         proxies_count,
@@ -51,14 +54,14 @@ pub async fn handle_get_proxies() -> Json<ProxyInfoResponse> {
 
 // 更新代理配置
 pub async fn handle_set_proxies(
-    Json(proxies): Json<ProxyUpdateRequest>,
-) -> Result<Json<ProxyInfoResponse>, (StatusCode, Json<GenericError>)> {
+    GenericJson(proxies): GenericJson<ProxyUpdateRequest>,
+) -> Result<InfallibleJson<ProxyInfoResponse>, (StatusCode, InfallibleJson<GenericError>)> {
     // 更新全局代理池并保存配置
     proxies.update_global();
     if let Err(e) = Proxies::update_and_save().await {
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(GenericError {
+            InfallibleJson(GenericError {
                 status: ApiStatus::Error,
                 code: None,
                 error: Some(Cow::Owned(format_save_proxy_config_error(e))),
@@ -70,7 +73,7 @@ pub async fn handle_set_proxies(
     // 获取通用代理信息（在更新应用状态前）
     let proxies_count = proxy_pool::proxies().load().len();
 
-    Ok(Json(ProxyInfoResponse {
+    Ok(InfallibleJson(ProxyInfoResponse {
         status: ApiStatus::Success,
         proxies: None,
         proxies_count,
@@ -81,8 +84,8 @@ pub async fn handle_set_proxies(
 
 // 添加新的代理
 pub async fn handle_add_proxy(
-    Json(request): Json<ProxyAddRequest>,
-) -> Result<Json<ProxyInfoResponse>, (StatusCode, Json<GenericError>)> {
+    GenericJson(request): GenericJson<ProxyAddRequest>,
+) -> Result<InfallibleJson<ProxyInfoResponse>, (StatusCode, InfallibleJson<GenericError>)> {
     // 获取当前的代理配置
     let current = proxy_pool::proxies().load_full();
     let proxies = request
@@ -95,7 +98,7 @@ pub async fn handle_add_proxy(
         // 如果没有新代理，返回当前状态
         let proxies_count = current.len();
 
-        return Ok(Json(ProxyInfoResponse {
+        return Ok(InfallibleJson(ProxyInfoResponse {
             status: ApiStatus::Success,
             proxies: Some(current),
             proxies_count,
@@ -120,7 +123,7 @@ pub async fn handle_add_proxy(
     if let Err(e) = Proxies::update_and_save().await {
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(GenericError {
+            InfallibleJson(GenericError {
                 status: ApiStatus::Error,
                 code: None,
                 error: Some(Cow::Owned(format_save_proxy_config_error(e))),
@@ -132,7 +135,7 @@ pub async fn handle_add_proxy(
     // 获取更新后的信息
     let proxies_count = proxy_pool::proxies().load().len();
 
-    Ok(Json(ProxyInfoResponse {
+    Ok(InfallibleJson(ProxyInfoResponse {
         status: ApiStatus::Success,
         proxies: None,
         proxies_count,
@@ -146,8 +149,8 @@ pub async fn handle_add_proxy(
 
 // 删除指定的代理
 pub async fn handle_delete_proxies(
-    Json(request): Json<ProxiesDeleteRequest>,
-) -> Result<Json<ProxiesDeleteResponse>, (StatusCode, Json<GenericError>)> {
+    GenericJson(request): GenericJson<ProxiesDeleteRequest>,
+) -> Result<InfallibleJson<ProxiesDeleteResponse>, (StatusCode, InfallibleJson<GenericError>)> {
     let names = request.names;
 
     // 获取当前的代理配置并计算失败的代理名称
@@ -187,7 +190,7 @@ pub async fn handle_delete_proxies(
     if let Err(e) = Proxies::update_and_save().await {
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(GenericError {
+            InfallibleJson(GenericError {
                 status: ApiStatus::Error,
                 code: None,
                 error: Some(Cow::Owned(format_save_proxy_config_error(e))),
@@ -203,7 +206,7 @@ pub async fn handle_delete_proxies(
         None
     };
 
-    Ok(Json(ProxiesDeleteResponse {
+    Ok(InfallibleJson(ProxiesDeleteResponse {
         status: ApiStatus::Success,
         updated_proxies,
         failed_names: if request.expectation.needs_failed_tokens() && !failed_names.is_empty() {
@@ -216,13 +219,13 @@ pub async fn handle_delete_proxies(
 
 // 设置通用代理
 pub async fn handle_set_general_proxy(
-    Json(request): Json<SetGeneralProxyRequest>,
-) -> Result<Json<CommonResponse>, (StatusCode, Json<GenericError>)> {
+    GenericJson(request): GenericJson<SetGeneralProxyRequest>,
+) -> Result<InfallibleJson<CommonResponse>, (StatusCode, InfallibleJson<GenericError>)> {
     // 检查代理名称是否存在
     if !proxy_pool::proxies().load().contains_key(request.name.as_str()) {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(GenericError {
+            InfallibleJson(GenericError {
                 status: ApiStatus::Error,
                 code: None,
                 error: Some(Cow::Borrowed(ERROR_PROXY_NAME_NOT_FOUND)),
@@ -238,7 +241,7 @@ pub async fn handle_set_general_proxy(
     if let Err(e) = Proxies::update_and_save().await {
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(GenericError {
+            InfallibleJson(GenericError {
                 status: ApiStatus::Error,
                 code: None,
                 error: Some(Cow::Owned(format_save_proxy_config_error(e))),
@@ -247,7 +250,7 @@ pub async fn handle_set_general_proxy(
         ));
     }
 
-    Ok(Json(CommonResponse {
+    Ok(InfallibleJson(CommonResponse {
         status: ApiStatus::Success,
         message: Cow::Borrowed(MESSAGE_GENERAL_PROXY_SET),
     }))

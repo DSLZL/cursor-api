@@ -1,5 +1,5 @@
 use crate::{
-    app::model::ErrorInfo as LogErrorInfo,
+    app::{model::ErrorInfo as LogErrorInfo, route::InfallibleJson},
     common::{
         model::{ApiStatus, GenericError},
         utils::proto_encode::ExceedSizeLimit,
@@ -126,11 +126,13 @@ impl Error {
 
     /// Converts to HTTP response tuple
     #[inline]
-    pub const fn into_response_tuple(self) -> (http::StatusCode, axum::Json<GenericError>) {
+    pub const fn into_response_tuple(
+        self,
+    ) -> (http::StatusCode, InfallibleJson<GenericError>) {
         let (status_code, error, message) = self.to_parts();
         (
             status_code,
-            axum::Json(GenericError {
+            InfallibleJson(GenericError {
                 status: ApiStatus::Error,
                 code: Some(status_code),
                 error: Some(Cow::Borrowed(error)),
@@ -141,11 +143,11 @@ impl Error {
 
     /// Converts to OpenAI error format
     #[inline]
-    pub const fn into_openai_tuple(self) -> (http::StatusCode, axum::Json<OpenAiError>) {
+    pub const fn into_openai_tuple(self) -> (http::StatusCode, InfallibleJson<OpenAiError>) {
         let (status_code, code, message) = self.to_parts();
         (
             status_code,
-            axum::Json(
+            InfallibleJson(
                 OpenAiErrorInner {
                     code: Some(Cow::Borrowed(code)),
                     message: Cow::Borrowed(message),
@@ -157,11 +159,13 @@ impl Error {
 
     /// Converts to Anthropic error format
     #[inline]
-    pub const fn into_anthropic_tuple(self) -> (http::StatusCode, axum::Json<AnthropicError>) {
+    pub const fn into_anthropic_tuple(
+        self,
+    ) -> (http::StatusCode, InfallibleJson<AnthropicError>) {
         let (status_code, code, message) = self.to_parts();
         (
             status_code,
-            axum::Json(
+            InfallibleJson(
                 AnthropicErrorInner { r#type: code, message: Cow::Borrowed(message) }.wrapped(),
             ),
         )

@@ -216,84 +216,96 @@ impl Adapter for Anthropic {
                     let mut all_thinking_blocks = Vec::new();
                     let mut next = None;
 
-                    if let Some(ContentBlockParam::ToolUse { id, name, input }) =
-                        contents.pop_if(|c| matches!(*c, ContentBlockParam::ToolUse { .. }))
-                        && let Some(param) = params.peek()
+                    if let Some(param) = params.peek()
                         && param.role == Role::User
-                        && let MessageContent::Array(ref contents) = param.content
-                        && contents.len() == 1
-                        && let ContentBlockParam::ToolResult { ref tool_use_id, .. } = contents[0]
-                        && id[..] == tool_use_id[..]
+                        && let MessageContent::Array(ref cs) = param.content
+                        && cs.iter().all(|c| matches!(*c, ContentBlockParam::ToolResult { .. }))
                     {
-                        drop(id);
-                        let Some(MessageContent::Array(contents)) =
-                            params.next().map(|p| p.content)
+                        let Some(MessageContent::Array(cs)) = params.next().map(|p| p.content)
                         else {
                             __unreachable!()
                         };
-                        let Some(ContentBlockParam::ToolResult { tool_use_id, content, is_error }) =
-                            contents.into_iter().next()
-                        else {
-                            __unreachable!()
-                        };
-                        let ToolName { tool_name, name, server_name } = ToolName::parse(name);
-                        let result = (content, is_error).result().await?;
-                        let tool_id = ToolId::parse(tool_use_id);
-                        let result = Some(ClientSideToolV2Result {
-                            tool: ClientSideToolV2::Mcp.into(),
-                            tool_call_id: tool_id.tool_call_id.clone(),
-                            model_call_id: tool_id.model_call_id.clone(),
-                            tool_index: Some(1),
-                            result: Some(Result::McpResult(McpResult {
-                                selected_tool: name.clone(),
-                                result,
-                            })),
-                        });
-                        use crate::core::aiserver::v1::{
-                            client_side_tool_v2_call::Params, client_side_tool_v2_result::Result,
-                            conversation_message::ToolResult,
-                        };
-                        let raw_args: ByteStr = __unwrap!(serde_json::to_string(&input)).into();
-                        let tool_call = Some(ClientSideToolV2Call {
-                            tool: ClientSideToolV2::Mcp.into(),
-                            params: Some(Params::McpParams(McpParams {
-                                tools: vec![mcp_params::Tool {
-                                    name,
-                                    parameters: raw_args.clone(),
-                                    server_name,
-                                    ..Default::default()
-                                }],
-                            })),
-                            tool_call_id: tool_id.tool_call_id.clone(),
-                            name: tool_name.clone(),
-                            tool_index: Some(1),
-                            model_call_id: tool_id.model_call_id.clone(),
-                            ..Default::default()
-                        });
-                        let result = ToolResult {
-                            tool_call_id: tool_id.tool_call_id,
-                            tool_name,
-                            tool_index: 1,
-                            model_call_id: tool_id.model_call_id,
-                            raw_args,
-                            result,
-                            tool_call,
-                        };
-                        next = Some(ConversationMessage {
-                            r#type: conversation_message::MessageType::Ai.into(),
-                            bubble_id: Uuid::new_v4().to_byte_str(),
-                            server_bubble_id: Some(Uuid::new_v4().to_byte_str()),
-                            tool_results: vec![result],
-                            unified_mode: Some(
-                                if is_agentic {
-                                    stream_unified_chat_request::UnifiedMode::Agent
+                        for c in cs {
+                            let ContentBlockParam::ToolResult { tool_use_id, content, is_error } =
+                                c
+                            else {
+                                __unreachable!()
+                            };
+                            if let Some(c) = contents.iter_mut().rfind(|c| {
+                                if let ContentBlockParam::ToolUse { id, .. } = c {
+                                    *id == tool_use_id
                                 } else {
-                                    stream_unified_chat_request::UnifiedMode::Chat
+                                    false
                                 }
-                                .into(),
-                            ),
-                            ..Default::default()
-                        });
+                            }) {
+                                let ContentBlockParam::ToolUse { name, input, .. } =
+                                    core::mem::replace(c, ContentBlockParam::Taked)
+                                else {
+                                    __unreachable!()
+                                };
+                                let ToolName { tool_name, name, server_name } =
+                                    ToolName::parse(name);
+                                let result = (content, is_error).result().await?;
+                                let tool_id = ToolId::parse(tool_use_id);
+                                let result = Some(ClientSideToolV2Result {
+                                    tool: ClientSideToolV2::Mcp.into(),
+                                    tool_call_id: tool_id.tool_call_id.clone(),
+                                    model_call_id: tool_id.model_call_id.clone(),
+                                    tool_index: Some(1),
+                                    result: Some(Result::McpResult(McpResult {
+                                        selected_tool: name.clone(),
+                                        result,
+                                    })),
+                                });
+                                use crate::core::aiserver::v1::{
+                                    client_side_tool_v2_call::Params,
+                                    client_side_tool_v2_result::Result,
+                                    conversation_message::ToolResult,
+                                };
+                                let raw_args: ByteStr =
+                                    __unwrap!(serde_json::to_string(&input)).into();
+                                let tool_call = Some(ClientSideToolV2Call {
+                                    tool: ClientSideToolV2::Mcp.into(),
+                                    params: Some(Params::McpParams(McpParams {
+                                        tools: vec![mcp_params::Tool {
+                                            name,
+                                            parameters: raw_args.clone(),
+                                            server_name,
+                                            ..Default::default()
+                                        }],
+                                    })),
+                                    tool_call_id: tool_id.tool_call_id.clone(),
+                                    name: tool_name.clone(),
+                                    tool_index: Some(1),
+                                    model_call_id: tool_id.model_call_id.clone(),
+                                    ..Default::default()
+                                });
+                                let result = ToolResult {
+                                    tool_call_id: tool_id.tool_call_id,
+                                    tool_name,
+                                    tool_index: 1,
+                                    model_call_id: tool_id.model_call_id,
+                                    raw_args,
+                                    result,
+                                    tool_call,
+                                };
+                                next = Some(ConversationMessage {
+                                    r#type: conversation_message::MessageType::Ai.into(),
+                                    bubble_id: Uuid::new_v4().to_byte_str(),
+                                    server_bubble_id: Some(Uuid::new_v4().to_byte_str()),
+                                    tool_results: vec![result],
+                                    unified_mode: Some(
+                                        if is_agentic {
+                                            stream_unified_chat_request::UnifiedMode::Agent
+                                        } else {
+                                            stream_unified_chat_request::UnifiedMode::Chat
+                                        }
+                                        .into(),
+                                    ),
+                                    ..Default::default()
+                                });
+                            }
+                        }
                     }
 
                     for content in contents {

@@ -433,6 +433,7 @@ impl Drop for Token {
                         e.remove();
                     }
                 } else {
+                    __cold_path!();
                     if let Some(mut prev) = TokenInner::find_prev(ptr, self.ptr) {
                         prev.as_mut().next = inner.next;
                         // if let Some(mut next) = inner.next {

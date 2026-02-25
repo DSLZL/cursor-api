@@ -94,6 +94,8 @@ pub enum ContentBlockParam {
         #[serde(default)]
         is_error: bool,
     },
+    #[serde(skip)]
+    Taked,
 }
 
 #[derive(Debug, Deserialize)]

@@ -12,7 +12,7 @@ use super::leaf::{
 use super::leaf_node::Locker as LeafNodeLocker;
 use super::leaf_node::RemoveRangeState;
 use super::node::Node;
-use crate::async_helper::LockPager;
+use crate::utils::{LockPager, deref_unchecked, take_snapshot, unwrap_unchecked};
 use crate::{Comparable, Guard};
 
 /// Internal node.
@@ -56,10 +56,32 @@ impl<K, V> InternalNode<K, V> {
         }
     }
 
+    /// Clears the node and its children.
+    #[inline]
+    pub(super) fn clear(&self, guard: &Guard) {
+        let Some(locker) = Locker::try_lock(self) else {
+            // Let the garbage collector clear the internal node.
+            return;
+        };
+
+        for pos in ArrayIter::new(&self.children) {
+            self.children
+                .remove_unchecked(self.children.metadata(), pos);
+            let (Some(node), _) = self.children.val(pos).swap((None, Tag::None), Acquire) else {
+                continue;
+            };
+            node.clear(guard);
+        }
+        if let (Some(unbounded), _) = self.unbounded_child.swap((None, Tag::None), Acquire) {
+            unbounded.clear(guard);
+        }
+        locker.unlock_retire();
+    }
+
     /// Returns the depth of the node.
     #[inline]
     pub(super) fn depth(&self, depth: usize, guard: &Guard) -> usize {
-        if let Some(unbounded) = self.unbounded_child.load(Acquire, guard).as_ref() {
+        if let Some(unbounded) = deref_unchecked(self.unbounded_child.load(Acquire, guard)) {
             return unbounded.depth(depth + 1, guard);
         }
         depth
@@ -87,7 +109,7 @@ where
         loop {
             let (child, metadata) = self.children.min_greater_equal(key);
             if let Some(child) = child {
-                if let Some(child) = child.load(Acquire, guard).as_ref() {
+                if let Some(child) = deref_unchecked(child.load(Acquire, guard)) {
                     if self.children.validate(metadata) {
                         // Data race resolution - see `LeafNode::search_entry`.
                         return child.search_entry(key, guard);
@@ -95,7 +117,7 @@ where
                 }
             } else {
                 let unbounded_ptr = self.unbounded_child.load(Acquire, guard);
-                if let Some(unbounded) = unbounded_ptr.as_ref() {
+                if let Some(unbounded) = deref_unchecked(unbounded_ptr) {
                     if self.children.validate(metadata) {
                         return unbounded.search_entry(key, guard);
                     }
@@ -116,7 +138,7 @@ where
         loop {
             let (child, metadata) = self.children.min_greater_equal(key);
             if let Some(child) = child {
-                if let Some(child) = child.load(Acquire, guard).as_ref() {
+                if let Some(child) = deref_unchecked(child.load(Acquire, guard)) {
                     if self.children.validate(metadata) {
                         // Data race resolution - see `LeafNode::search_entry`.
                         return child.search_value(key, guard);
@@ -124,7 +146,7 @@ where
                 }
             } else {
                 let unbounded_ptr = self.unbounded_child.load(Acquire, guard);
-                if let Some(unbounded) = unbounded_ptr.as_ref() {
+                if let Some(unbounded) = deref_unchecked(unbounded_ptr) {
                     if self.children.validate(metadata) {
                         return unbounded.search_value(key, guard);
                     }
@@ -150,7 +172,7 @@ where
         loop {
             let (child, metadata) = self.children.min_greater_equal(key);
             if let Some(child) = child {
-                if let Some(child) = child.load(Acquire, guard).as_ref() {
+                if let Some(child) = deref_unchecked(child.load(Acquire, guard)) {
                     if self.children.validate(metadata) {
                         // Data race resolution - see `LeafNode::search_entry`.
                         return child.read_entry(key, reader, pager, guard);
@@ -158,7 +180,7 @@ where
                 }
             } else {
                 let unbounded_ptr = self.unbounded_child.load(Acquire, guard);
-                if let Some(unbounded) = unbounded_ptr.as_ref() {
+                if let Some(unbounded) = deref_unchecked(unbounded_ptr) {
                     if self.children.validate(metadata) {
                         return unbounded.read_entry(key, reader, pager, guard);
                     }
@@ -173,11 +195,11 @@ where
     #[inline]
     pub(super) fn min<'g>(&self, guard: &'g Guard) -> Option<Iter<'g, K, V>> {
         let mut unbounded_ptr = self.unbounded_child.load(Acquire, guard);
-        while let Some(unbounded) = unbounded_ptr.as_ref() {
+        while let Some(unbounded) = deref_unchecked(unbounded_ptr) {
             let mut iter = ArrayIter::new(&self.children);
             for i in iter.by_ref() {
                 let child_ptr = self.children.val(i).load(Acquire, guard);
-                if let Some(child) = child_ptr.as_ref() {
+                if let Some(child) = deref_unchecked(child_ptr) {
                     if let Some(iter) = child.min(guard) {
                         return Some(iter);
                     }
@@ -202,7 +224,7 @@ where
     #[inline]
     pub(super) fn max<'g>(&self, guard: &'g Guard) -> Option<RevIter<'g, K, V>> {
         let mut unbounded_ptr = self.unbounded_child.load(Acquire, guard);
-        while let Some(unbounded) = unbounded_ptr.as_ref() {
+        while let Some(unbounded) = deref_unchecked(unbounded_ptr) {
             let mut rev_iter = ArrayRevIter::new(&self.children);
             if let Some(iter) = unbounded.max(guard) {
                 return Some(iter);
@@ -210,7 +232,7 @@ where
             // `post_remove` may be replacing the retired unbounded child with an existing child.
             for i in rev_iter.by_ref() {
                 let child_ptr = self.children.val(i).load(Acquire, guard);
-                if let Some(child) = child_ptr.as_ref() {
+                if let Some(child) = deref_unchecked(child_ptr) {
                     if let Some(iter) = child.max(guard) {
                         return Some(iter);
                     }
@@ -242,7 +264,7 @@ where
             // Firstly, try to find a key in the optimal child.
             let (child, metadata) = self.children.min_greater_equal(key);
             if let Some(child) = child {
-                if let Some(child) = child.load(Acquire, guard).as_ref() {
+                if let Some(child) = deref_unchecked(child.load(Acquire, guard)) {
                     if self.children.validate(metadata) {
                         if let Some(iter) = child.approximate::<_, LE>(key, guard) {
                             return Some(iter);
@@ -259,7 +281,7 @@ where
 
             // Secondly, check the unbounded child.
             let unbounded_ptr = self.unbounded_child.load(Acquire, guard);
-            if let Some(unbounded) = unbounded_ptr.as_ref() {
+            if let Some(unbounded) = deref_unchecked(unbounded_ptr) {
                 if self.children.validate(metadata) {
                     if let Some(iter) = unbounded.approximate::<_, LE>(key, guard) {
                         return Some(iter);
@@ -275,7 +297,7 @@ where
             // Lastly, try to find a key in any child.
             for i in ArrayIter::new(&self.children) {
                 let child_ptr = self.children.val(i).load(Acquire, guard);
-                if let Some(child) = child_ptr.as_ref() {
+                if let Some(child) = deref_unchecked(child_ptr) {
                     if let Some(iter) = child.approximate::<_, LE>(key, guard) {
                         return Some(iter);
                     }
@@ -304,7 +326,7 @@ where
             let (child, metadata) = self.children.min_greater_equal(&key);
             if let Some(child) = child {
                 let child_ptr = child.load(Acquire, guard);
-                if let Some(child_ref) = child_ptr.as_ref() {
+                if let Some(child_ref) = deref_unchecked(child_ptr) {
                     if self.children.validate(metadata) {
                         // Data race resolution - see `LeafNode::search_entry`.
                         let insert_result = child_ref.insert(key, val, pager, guard)?;
@@ -331,7 +353,7 @@ where
             }
 
             let unbounded_ptr = self.unbounded_child.load(Acquire, guard);
-            if let Some(unbounded) = unbounded_ptr.as_ref() {
+            if let Some(unbounded) = deref_unchecked(unbounded_ptr) {
                 if !self.children.validate(metadata) {
                     continue;
                 }
@@ -378,7 +400,7 @@ where
             let (child, metadata) = self.children.min_greater_equal(key);
             if let Some(child) = child {
                 let child_ptr = child.load(Acquire, guard);
-                if let Some(child) = child_ptr.as_ref() {
+                if let Some(child) = deref_unchecked(child_ptr) {
                     if self.children.validate(metadata) {
                         // Data race resolution - see `LeafNode::search_entry`.
                         let result = child.remove_if::<_, _, _>(key, condition, pager, guard)?;
@@ -392,7 +414,7 @@ where
                 continue;
             }
             let unbounded_ptr = self.unbounded_child.load(Acquire, guard);
-            if let Some(unbounded) = unbounded_ptr.as_ref() {
+            if let Some(unbounded) = deref_unchecked(unbounded_ptr) {
                 if !self.children.validate(metadata) {
                     // Data race resolution - see `LeafNode::search_entry`.
                     continue;
@@ -507,7 +529,9 @@ where
         if let Some(lower_leaf) = valid_lower_max_leaf {
             // It is currently in the middle of a recursive call: pass `lower_leaf` to connect leaves.
             debug_assert!(start_unbounded && lower_border.is_none() && upper_border.is_some());
-            if let Some(upper_node) = upper_border.and_then(|n| n.load(Acquire, guard).as_ref()) {
+            if let Some(upper_node) =
+                upper_border.and_then(|n| deref_unchecked(n.load(Acquire, guard)))
+            {
                 upper_node.remove_range(range, true, Some(lower_leaf), None, pager, guard)?;
             }
         } else if let Some(upper_node) = valid_upper_min_node {
@@ -521,7 +545,7 @@ where
                     .swap((lower_node.get_shared(Acquire, guard), Tag::None), AcqRel);
                 lower_node.swap((None, Tag::None), Release);
             }
-            if let Some(lower_node) = self.unbounded_child.load(Acquire, guard).as_ref() {
+            if let Some(lower_node) = deref_unchecked(self.unbounded_child.load(Acquire, guard)) {
                 lower_node.remove_range(
                     range,
                     start_unbounded,
@@ -532,8 +556,8 @@ where
                 )?;
             }
         } else {
-            let lower_node = lower_border.and_then(|n| n.1.load(Acquire, guard).as_ref());
-            let upper_node = upper_border.and_then(|n| n.load(Acquire, guard).as_ref());
+            let lower_node = lower_border.and_then(|n| deref_unchecked(n.1.load(Acquire, guard)));
+            let upper_node = upper_border.and_then(|n| deref_unchecked(n.load(Acquire, guard)));
             match (lower_node, upper_node) {
                 (_, None) => (),
                 (None, Some(upper_node)) => {
@@ -587,7 +611,7 @@ where
             return Err(());
         }
 
-        let target = full_node_ptr.as_ref().unwrap();
+        let target = unwrap_unchecked(deref_unchecked(full_node_ptr));
         let is_full = self.children.is_full();
         match target {
             Node::Internal(target) => {
@@ -603,7 +627,7 @@ where
 
                 let mut low_key_node = None;
                 let mut high_key_node = None;
-                let mut boundary_key = None;
+                let mut boundary_node = None;
                 let mut i = 0;
                 if !target.children.distribute(
                     |boundary, len| {
@@ -615,10 +639,7 @@ where
                         true
                     },
                     |k, v, pos, boundary| {
-                        if v.load(Acquire, guard)
-                            .as_ref()
-                            .is_some_and(Node::is_retired)
-                        {
+                        if deref_unchecked(v.load(Acquire, guard)).is_some_and(Node::is_retired) {
                             // See `post_remove` for this operation ordering.
                             let result = target
                                 .children
@@ -638,15 +659,11 @@ where
                             if i == boundary - 1 {
                                 // Need to adjust the reference count of  `v` before `target` is frozen.
                                 debug_assert!(!is_full);
-                                low_key_internal_node
-                                    .unbounded_child
-                                    .swap((v.get_shared(Acquire, guard), Tag::None), Relaxed);
-                                boundary_key
-                                    .replace(ManuallyDrop::new(unsafe { ptr::from_ref(k).read() }));
+                                boundary_node.replace((take_snapshot(k), take_snapshot(v)));
                             } else {
                                 low_key_internal_node.children.insert_unchecked(
-                                    unsafe { ptr::from_ref(k).read() },
-                                    unsafe { ptr::from_ref(v).read() },
+                                    ManuallyDrop::into_inner(take_snapshot(k)),
+                                    ManuallyDrop::into_inner(take_snapshot(v)),
                                     i,
                                 );
                             }
@@ -660,8 +677,8 @@ where
                                 return;
                             };
                             high_key_internal_node.children.insert_unchecked(
-                                unsafe { ptr::from_ref(k).read() },
-                                unsafe { ptr::from_ref(v).read() },
+                                ManuallyDrop::into_inner(take_snapshot(k)),
+                                ManuallyDrop::into_inner(take_snapshot(v)),
                                 i - boundary,
                             );
                         }
@@ -678,24 +695,10 @@ where
                     return Err(());
                 };
 
-                if low_key_internal_node.unbounded_child.is_null(Relaxed) {
-                    // `low_key_internal_node` now owns the children.
-                    let unfrozen = low_key_internal_node.children.unfreeze();
-                    debug_assert!(unfrozen);
-                    debug_assert!(high_key_node.is_none());
-
-                    // The target will be replaced with `low_key_node`.
-                    low_key_internal_node.unbounded_child.swap(
-                        (target.unbounded_child.get_shared(Acquire, guard), Tag::None),
-                        Relaxed,
-                    );
-                    full_node.swap((Some(low_key_node), Tag::None), AcqRel);
-                } else {
+                if let Some((boundary_key, boundary_node)) = boundary_node {
                     let high_key_node = high_key_node
                         .unwrap_or_else(|| Shared::new_with(Node::new_internal_node_frozen));
-                    let (Node::Internal(high_key_internal_node), Some(key)) =
-                        (high_key_node.as_ref(), boundary_key)
-                    else {
+                    let Node::Internal(high_key_internal_node) = high_key_node.as_ref() else {
                         // Technically unreachable.
                         return Err(());
                     };
@@ -705,22 +708,36 @@ where
                     let unfrozen_high = high_key_internal_node.children.unfreeze();
                     debug_assert!(unfrozen_low && unfrozen_high);
 
-                    high_key_internal_node.unbounded_child.swap(
-                        (target.unbounded_child.get_shared(Acquire, guard), Tag::None),
-                        Relaxed,
-                    );
-
-                    // Adjust the reference count of `low_key_internal_node.unbounded_child`.
-                    let unbounded_child =
-                        unsafe { ptr::from_ref(&low_key_internal_node.unbounded_child).read() };
-                    drop(unbounded_child);
+                    let low_key_internal_node_unbounded =
+                        ManuallyDrop::into_inner(boundary_node).into_shared(Acquire);
+                    low_key_internal_node
+                        .unbounded_child
+                        .swap((low_key_internal_node_unbounded, Tag::None), Relaxed);
+                    let target_unbounded =
+                        ManuallyDrop::into_inner(take_snapshot(&target.unbounded_child));
+                    high_key_internal_node
+                        .unbounded_child
+                        .swap((target_unbounded.into_shared(Acquire), Tag::None), Relaxed);
 
                     let result = self.children.insert(
-                        ManuallyDrop::into_inner(key),
+                        ManuallyDrop::into_inner(boundary_key),
                         AtomicShared::from(low_key_node),
                     );
                     debug_assert!(matches!(result, InsertResult::Success));
                     full_node.swap((Some(high_key_node), Tag::None), Release);
+                } else {
+                    // `low_key_internal_node` now owns the children.
+                    let unfrozen = low_key_internal_node.children.unfreeze();
+                    debug_assert!(unfrozen);
+                    debug_assert!(high_key_node.is_none());
+
+                    // The target will be replaced with `low_key_node`.
+                    let target_unbounded =
+                        ManuallyDrop::into_inner(take_snapshot(&target.unbounded_child));
+                    low_key_internal_node
+                        .unbounded_child
+                        .swap((target_unbounded.into_shared(Acquire), Tag::None), Relaxed);
+                    full_node.swap((Some(low_key_node), Tag::None), AcqRel);
                 }
 
                 // Ownership of entries has been transferred to the new internal nodes.
@@ -742,7 +759,7 @@ where
 
                 let mut low_key_node = None;
                 let mut high_key_node = None;
-                let mut boundary_key = None;
+                let mut boundary_node = None;
                 let mut i = 0;
                 if !target.children.distribute(
                     |boundary, len| {
@@ -764,15 +781,11 @@ where
                             if i == boundary - 1 {
                                 // Need to adjust the reference count of  `v` before `target` is frozen.
                                 debug_assert!(!is_full);
-                                low_key_leaf_node
-                                    .unbounded_child
-                                    .swap((v.get_shared(Acquire, guard), Tag::None), Relaxed);
-                                boundary_key
-                                    .replace(ManuallyDrop::new(unsafe { ptr::from_ref(k).read() }));
+                                boundary_node.replace((take_snapshot(k), take_snapshot(v)));
                             } else {
                                 low_key_leaf_node.children.insert_unchecked(
-                                    unsafe { ptr::from_ref(k).read() },
-                                    unsafe { ptr::from_ref(v).read() },
+                                    ManuallyDrop::into_inner(take_snapshot(k)),
+                                    ManuallyDrop::into_inner(take_snapshot(v)),
                                     i,
                                 );
                             }
@@ -785,8 +798,8 @@ where
                                 return;
                             };
                             high_key_leaf_node.children.insert_unchecked(
-                                unsafe { ptr::from_ref(k).read() },
-                                unsafe { ptr::from_ref(v).read() },
+                                ManuallyDrop::into_inner(take_snapshot(k)),
+                                ManuallyDrop::into_inner(take_snapshot(v)),
                                 i - boundary,
                             );
                         }
@@ -803,24 +816,10 @@ where
                     return Err(());
                 };
 
-                if low_key_leaf_node.unbounded_child.is_null(Relaxed) {
-                    // `low_key_leaf_node` now owns the children.
-                    let unfrozen = low_key_leaf_node.children.unfreeze();
-                    debug_assert!(unfrozen);
-                    debug_assert!(high_key_node.is_none());
-
-                    // The target will be replaced with `low_key_node`.
-                    low_key_leaf_node.unbounded_child.swap(
-                        (target.unbounded_child.get_shared(Acquire, guard), Tag::None),
-                        Relaxed,
-                    );
-                    full_node.swap((Some(low_key_node), Tag::None), AcqRel);
-                } else {
+                if let Some((boundary_key, boundary_node)) = boundary_node {
                     let high_key_node = high_key_node
                         .unwrap_or_else(|| Shared::new_with(Node::new_leaf_node_frozen));
-                    let (Node::Leaf(high_key_leaf_node), Some(key)) =
-                        (high_key_node.as_ref(), boundary_key)
-                    else {
+                    let Node::Leaf(high_key_leaf_node) = high_key_node.as_ref() else {
                         // Technically unreachable.
                         return Err(());
                     };
@@ -830,22 +829,37 @@ where
                     let unfrozen_high = high_key_leaf_node.children.unfreeze();
                     debug_assert!(unfrozen_low && unfrozen_high);
 
-                    high_key_leaf_node.unbounded_child.swap(
-                        (target.unbounded_child.get_shared(Acquire, guard), Tag::None),
-                        Relaxed,
-                    );
+                    let target_unbounded =
+                        ManuallyDrop::into_inner(take_snapshot(&target.unbounded_child));
+                    high_key_leaf_node
+                        .unbounded_child
+                        .swap((target_unbounded.into_shared(Acquire), Tag::None), Relaxed);
 
-                    // Adjust the reference count of `low_key_leaf_node.unbounded_child`.
-                    let unbounded_child =
-                        unsafe { ptr::from_ref(&low_key_leaf_node.unbounded_child).read() };
-                    drop(unbounded_child);
+                    let low_key_leaf_node_unbounded =
+                        ManuallyDrop::into_inner(boundary_node).into_shared(Acquire);
+                    low_key_leaf_node
+                        .unbounded_child
+                        .swap((low_key_leaf_node_unbounded, Tag::None), Relaxed);
 
                     let result = self.children.insert(
-                        ManuallyDrop::into_inner(key),
+                        ManuallyDrop::into_inner(boundary_key),
                         AtomicShared::from(low_key_node),
                     );
                     debug_assert!(matches!(result, InsertResult::Success));
                     full_node.swap((Some(high_key_node), Tag::None), Release);
+                } else {
+                    // `low_key_leaf_node` now owns the children.
+                    let unfrozen = low_key_leaf_node.children.unfreeze();
+                    debug_assert!(unfrozen);
+                    debug_assert!(high_key_node.is_none());
+
+                    // The target will be replaced with `low_key_node`.
+                    let target_unbounded =
+                        ManuallyDrop::into_inner(take_snapshot(&target.unbounded_child));
+                    low_key_leaf_node
+                        .unbounded_child
+                        .swap((target_unbounded.into_shared(Acquire), Tag::None), Relaxed);
+                    full_node.swap((Some(low_key_node), Tag::None), AcqRel);
                 }
 
                 // Ownership of entries has been transferred to the new leaf nodes.
@@ -876,7 +890,7 @@ where
         for pos in ArrayIter::new(&self.children) {
             let node = self.children.val(pos);
             let node_ptr = node.load(Acquire, guard);
-            let node_ref = node_ptr.as_ref().unwrap();
+            let node_ref = unwrap_unchecked(deref_unchecked(node_ptr));
             if node_ref.is_retired() {
                 let result = self
                     .children
@@ -893,7 +907,7 @@ where
 
         // The unbounded node is replaced with the maximum key node if retired.
         let unbounded_ptr = self.unbounded_child.load(Acquire, guard);
-        let fully_empty = if let Some(unbounded) = unbounded_ptr.as_ref() {
+        let fully_empty = if let Some(unbounded) = deref_unchecked(unbounded_ptr) {
             if unbounded.is_retired() {
                 if let Some((max_key_child, pos)) = max_key_entry {
                     self.unbounded_child.swap(
@@ -905,13 +919,7 @@ where
                     max_key_child.swap((None, Tag::None), Release);
                     false
                 } else {
-                    // `Tag::First` prevents `insert` from allocating a new node.
-                    if let Some(obsolete_node) =
-                        self.unbounded_child.swap((None, Tag::First), Release).0
-                    {
-                        debug_assert!(obsolete_node.is_retired());
-                        let _: bool = obsolete_node.release();
-                    }
+                    self.unbounded_child.swap((None, Tag::None), Release);
                     true
                 }
             } else {
@@ -941,7 +949,7 @@ where
         write!(f, "retired: {}, ", self.is_retired())?;
         self.children.for_each(|i, rank, entry, removed| {
             if let Some((k, l)) = entry {
-                if let Some(l) = l.load(Acquire, &guard).as_ref() {
+                if let Some(l) = deref_unchecked(l.load(Acquire, &guard)) {
                     write!(f, "{i}: ({k:?}, {rank}, removed: {removed}, {l:?}), ")?;
                 } else {
                     write!(f, "{i}: ({k:?}, {rank}, removed: {removed}, null), ")?;
@@ -949,12 +957,23 @@ where
             }
             Ok(())
         })?;
-        if let Some(unbounded) = self.unbounded_child.load(Acquire, &guard).as_ref() {
+        if let Some(unbounded) = deref_unchecked(self.unbounded_child.load(Acquire, &guard)) {
             write!(f, "unbounded: {unbounded:?}")?;
         } else {
             write!(f, "unbounded: null")?;
         }
         f.write_str(" }")
+    }
+}
+
+impl<K, V> Drop for InternalNode<K, V> {
+    #[inline]
+    fn drop(&mut self) {
+        if self.is_retired() {
+            // The ownership of `unbounded_child` was moved to new nodes.
+            let _unbounded =
+                ManuallyDrop::new(self.unbounded_child.swap((None, Tag::None), Acquire).0);
+        }
     }
 }
 

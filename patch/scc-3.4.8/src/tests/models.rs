@@ -226,10 +226,11 @@ fn tree_index_split_leaf_node() {
             );
         });
 
+        let tree_index_clone = tree_index.clone();
         let thread_remove = spawn(move || {
             let key: usize = key_to_remove;
             assert_eq!(
-                tree_index
+                tree_index_clone
                     .peek_with(key.borrow(), |_key, value| value.0)
                     .unwrap(),
                 key
@@ -238,6 +239,7 @@ fn tree_index_split_leaf_node() {
 
         assert!(thread_insert.join().is_ok());
         assert!(thread_remove.join().is_ok());
+        drop(tree_index);
 
         while cnt.load(Relaxed) != 0 {
             Guard::new().accelerate();
@@ -251,7 +253,7 @@ fn tree_index_split_leaf_node() {
 fn tree_index_split_internal_node() {
     let _guard = SERIALIZER.lock().unwrap();
 
-    let keys = 365; // `13 * 14 + 14` + 1 will trigger an internal node split.
+    let keys = 365; // `13 * 14 + 14` + 1 will trigger an internal creation.
     let key_to_remove = 0;
     let mut model_builder_new_internal_node = Builder::new();
     model_builder_new_internal_node.max_branches = 1_048_576 * 16;
@@ -273,19 +275,21 @@ fn tree_index_split_internal_node() {
             );
         });
 
+        let tree_index_clone = tree_index.clone();
         let thread_remove = spawn(move || {
             let key: usize = key_to_remove;
             assert_eq!(
-                tree_index
+                tree_index_clone
                     .peek_with(key.borrow(), |_key, value| value.0)
                     .unwrap(),
                 key
             );
-            assert!(tree_index.remove_sync(key.borrow()));
+            assert!(tree_index_clone.remove_sync(key.borrow()));
         });
 
         assert!(thread_insert.join().is_ok());
         assert!(thread_remove.join().is_ok());
+        drop(tree_index);
 
         while cnt.load(Relaxed) != 0 {
             Guard::new().accelerate();
@@ -321,16 +325,20 @@ fn tree_index_remove_leaf_node() {
             assert!(tree_index_clone.remove_sync(key_to_remove.borrow()));
         });
 
+        let tree_index_clone = tree_index.clone();
         let thread_read = spawn(move || {
             let key = key_to_remove;
             assert_eq!(
-                tree_index.peek_with(&key, |_key, value| value.0).unwrap(),
+                tree_index_clone
+                    .peek_with(&key, |_key, value| value.0)
+                    .unwrap(),
                 key
             );
         });
 
         assert!(thread_remove.join().is_ok());
         assert!(thread_read.join().is_ok());
+        drop(tree_index);
 
         while cnt.load(Relaxed) != 0 {
             Guard::new().accelerate();
@@ -370,12 +378,14 @@ fn tree_index_remove_internal_node() {
             );
         });
 
+        let tree_index_clone = tree_index.clone();
         let thread_remove = spawn(move || {
-            assert!(tree_index.remove_sync(key_to_remove.borrow()));
+            assert!(tree_index_clone.remove_sync(key_to_remove.borrow()));
         });
 
         assert!(thread_read.join().is_ok());
         assert!(thread_remove.join().is_ok());
+        drop(tree_index);
 
         while cnt.load(Relaxed) != 0 {
             Guard::new().accelerate();

@@ -12,6 +12,7 @@ pub struct CursorError {
 struct Error {
     code: String,
     // message: String, // always: Error
+    #[serde(default)]
     details: Vec<Detail>,
 }
 
@@ -80,12 +81,7 @@ impl CursorError {
             }
             .value
             .into(),
-            0 => {
-                __cold_path!();
-                eprintln!("收到未知错误，请尝试联系开发者以获取支持");
-                crate::debug!("code: {:?}", self.error.code);
-                CanonicalError::unknown()
-            }
+            0 => CanonicalError::unknown(),
             n => {
                 eprintln!("收到少见错误数: {n}，请尝试联系开发者以获取支持");
                 crate::debug!("错误({n}): {:?}", self.error);

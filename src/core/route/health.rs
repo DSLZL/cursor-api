@@ -3,6 +3,7 @@ use crate::{
         frontend::metadata,
         lazy::START_TIME,
         model::{AppState, DateTime},
+        route::InfallibleJson,
     },
     common::model::{
         ApiStatus,
@@ -14,7 +15,7 @@ use crate::{
     core::constant::Models,
 };
 use alloc::sync::Arc;
-use axum::{Json, extract::State};
+use axum::extract::State;
 use core::sync::atomic::Ordering::Relaxed;
 use manually_init::ManuallyInit;
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, Pid, RefreshKind, System};
@@ -30,11 +31,13 @@ pub fn init_endpoints(paths: HashSet<&'static str>) {
     ENDPOINTS.init(Box::leak(vec.into_boxed_slice()));
 }
 
-pub async fn handle_health(State(state): State<Arc<AppState>>) -> Json<HealthCheckResponse> {
+pub async fn handle_health(
+    State(state): State<Arc<AppState>>,
+) -> InfallibleJson<HealthCheckResponse> {
     // 将系统信息采集移到阻塞线程池
     let system = tokio::task::spawn_blocking(collect_system_stats).await.ok();
 
-    Json(HealthCheckResponse {
+    InfallibleJson(HealthCheckResponse {
         status: ApiStatus::Success,
         service: service_info(),
         frontend: metadata(),

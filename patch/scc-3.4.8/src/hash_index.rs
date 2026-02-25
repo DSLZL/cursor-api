@@ -1378,6 +1378,9 @@ where
             let dropped = unsafe { garbage_bucket_array.drop_in_place() };
             debug_assert!(dropped);
         }
+        for _ in 0..4 {
+            Guard::new().accelerate();
+        }
     }
 }
 

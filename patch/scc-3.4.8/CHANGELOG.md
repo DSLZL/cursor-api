@@ -3,6 +3,11 @@
 
 ## Version 3
 
+3.6.5
+
+* Faster memory reclamation after dropping a container at the cost of slower `fn drop`.
+* Minor branch optimization.
+
 3.6.4
 
 * Minor `TreeIndex::remove_range_{async, sync}` optimization.
@@ -23,7 +28,6 @@
 3.6.0
 
 * *Breaking change / API update*.
-
   * `{HashMap, HashCache}::ConsumableEntry` returns key and value references separately to prevent accidental key field modification.
   * `{HashMap, HashCache}::iter_mut_{async, sync}` methods are affected by the breaking change.
   * Example:
@@ -43,7 +47,6 @@
     });
     assert_eq!(consumed, Some(3));
     ```
-  
 * Update the storage format of `Hash*` containers for better memory utilization: `K` and `V` are stored separately.
 * Minor `TreeIndex::insert_*` performance improvement.
 

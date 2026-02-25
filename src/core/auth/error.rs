@@ -1,12 +1,14 @@
+use crate::{
+    app::route::InfallibleJson,
+    common::model::{ApiStatus, GenericError},
+    core::{
+        error::ErrorExt,
+        model::{anthropic, openai},
+    },
+};
 use alloc::borrow::Cow;
-
-use http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
-
-use crate::core::error::ErrorExt;
-use crate::core::model::{anthropic, openai};
-use crate::common::model::{ApiStatus, GenericError};
+use http::StatusCode;
 
 /// Authentication and authorization errors
 #[derive(Clone, Copy)]
@@ -59,7 +61,7 @@ impl AuthError {
     pub fn into_generic(self) -> GenericError {
         GenericError {
             status: ApiStatus::Error,
-            code: None,
+            code: Some(self.status_code()),
             error: Some(Cow::Borrowed(self.error_type())),
             message: Some(Cow::Borrowed(self.message())),
         }
@@ -89,27 +91,24 @@ impl AuthError {
 impl ErrorExt for AuthError {
     /// Converts to Generic error format
     #[inline]
-    fn into_generic_tuple(self) -> (StatusCode, Json<GenericError>) {
-        (self.status_code(), Json(self.into_generic()))
+    fn into_generic_tuple(self) -> (StatusCode, InfallibleJson<GenericError>) {
+        (self.status_code(), InfallibleJson(self.into_generic()))
     }
 
     /// Converts to OpenAI error format
     #[inline]
-    fn into_openai_tuple(self) -> (StatusCode, Json<openai::OpenAiError>) {
-        (self.status_code(), Json(self.into_openai()))
+    fn into_openai_tuple(self) -> (StatusCode, InfallibleJson<openai::OpenAiError>) {
+        (self.status_code(), InfallibleJson(self.into_openai()))
     }
 
     /// Converts to Anthropic error format
     #[inline]
-    fn into_anthropic_tuple(self) -> (StatusCode, Json<anthropic::AnthropicError>) {
-        (self.status_code(), Json(self.into_anthropic()))
+    fn into_anthropic_tuple(self) -> (StatusCode, InfallibleJson<anthropic::AnthropicError>) {
+        (self.status_code(), InfallibleJson(self.into_anthropic()))
     }
 }
 
 impl IntoResponse for AuthError {
     #[inline]
-    fn into_response(self) -> Response {
-        let status = self.status_code();
-        (status, Json(self.into_generic())).into_response()
-    }
+    fn into_response(self) -> Response { self.into_generic_tuple().into_response() }
 }

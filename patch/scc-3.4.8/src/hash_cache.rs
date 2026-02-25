@@ -1263,6 +1263,9 @@ where
                 // remain outside the lifetime of the `HashCache`.
                 a.drop_in_place()
             });
+        for _ in 0..4 {
+            Guard::new().accelerate();
+        }
     }
 }
 

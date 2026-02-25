@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicUsize};
 use saa::Lock;
 use sdd::{AtomicShared, Epoch, Shared, Tag};
 
-use crate::async_helper::AsyncGuard;
 use crate::data_block::DataBlock;
+use crate::utils::AsyncGuard;
 use crate::{Equivalent, Guard};
 
 /// [`Bucket`] is a lock-protected fixed-size entry array.

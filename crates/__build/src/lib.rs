@@ -1,6 +1,5 @@
 // style
 #![allow(clippy::redundant_static_lifetimes, clippy::needless_pub_self)]
-#![feature(cfg_select)]
 
 #[macro_use]
 mod _marco;

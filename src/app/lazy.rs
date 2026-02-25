@@ -357,9 +357,9 @@ impl<const DEFAULT: NonNegativeI8, const MAX: NonNegativeI8> ParseFromEnv
 
 impl<const DEFAULT: NonNegativeI8, const MAX: NonNegativeI8> ToCount<DEFAULT, MAX> {
     pub fn to_count(self) -> Option<u32> { self.0.map(|v| v.as_inner() as _) }
-    pub fn to_count_or_default(self) -> u32 {
-        self.to_count().unwrap_or(const { DEFAULT.as_inner() as _ })
-    }
+    // pub fn to_count_or_default(self) -> u32 {
+    //     self.to_count().unwrap_or(const { DEFAULT.as_inner() as _ })
+    // }
     pub fn parse_from_env(key: &'static str) -> Self {
         <Self as ParseFromEnv>::parse_from_env(key).unwrap_or(Self(Some(DEFAULT)))
     }

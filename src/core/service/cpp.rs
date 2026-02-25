@@ -5,13 +5,12 @@ use crate::{
         },
         lazy::{cpp_config_url, cpp_models_url},
         model::CppService,
+        route::{GenericJson, InfallibleJson},
     },
     common::{
         client::{AiServiceRequest, build_client_request},
         model::{GenericError, error::ChatError},
-        utils::{
-            CollectBytes, CollectBytesParts, encode_message, encode_message_framed, new_uuid_v4,
-        },
+        utils::{CollectBytesParts, encode_message, encode_message_framed, new_uuid_v4},
     },
     core::{
         aiserver::v1::{
@@ -23,13 +22,11 @@ use crate::{
         stream::decoder::{
             cpp::{StreamDecoder, StreamMessage},
             direct,
-            types::{DecodedMessage, DecoderError},
         },
     },
 };
 use alloc::borrow::Cow;
 use axum::{
-    Json,
     body::Body,
     response::{IntoResponse as _, Response},
 };
@@ -40,20 +37,50 @@ use http::{
     Extensions, HeaderMap, StatusCode,
     header::{
         ACCESS_CONTROL_ALLOW_CREDENTIALS, ACCESS_CONTROL_ALLOW_HEADERS, CACHE_CONTROL, CONNECTION,
-        CONTENT_LENGTH, CONTENT_TYPE, COOKIE, TRANSFER_ENCODING, VARY,
+        CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, TRANSFER_ENCODING, VARY,
     },
 };
+
+const TO_REMOVE_HEADERS: [http::HeaderName; 7] = [
+    CONTENT_TYPE,
+    CONTENT_LENGTH,
+    CONTENT_ENCODING,
+    TRANSFER_ENCODING,
+    VARY,
+    ACCESS_CONTROL_ALLOW_CREDENTIALS,
+    ACCESS_CONTROL_ALLOW_HEADERS,
+];
+
+fn json_response_with_upstream_parts(parts: http::response::Parts, body: Vec<u8>) -> Response {
+    let mut builder = Response::builder().status(parts.status).version(parts.version);
+
+    for (name, value) in parts.headers.iter() {
+        if TO_REMOVE_HEADERS.contains(name) {
+            continue;
+        }
+        builder = builder.header(name, value);
+    }
+
+    let mut res = __unwrap!(
+        builder
+            .header(CONTENT_TYPE, JSON)
+            .header(CONTENT_LENGTH, body.len())
+            .body(Body::from(body))
+    );
+    *res.extensions_mut() = parts.extensions;
+    res
+}
 
 pub async fn handle_cpp_config(
     mut headers: HeaderMap,
     mut extensions: Extensions,
-    Json(request): Json<CppConfigRequest>,
-) -> Result<Json<CppConfigResponse>, Response> {
+    GenericJson(request): GenericJson<CppConfigRequest>,
+) -> Result<InfallibleJson<CppConfigResponse>, (StatusCode, InfallibleJson<GenericError>)> {
     let (ext_token, use_pri) = __unwrap!(extensions.remove::<TokenBundle>());
 
     let (data, compressed) = match encode_message(&request) {
         Ok(o) => o,
-        Err(e) => return Err(e.into_response()),
+        Err(e) => return Err(e.into_response_tuple()),
     };
 
     let req = build_client_request(AiServiceRequest {
@@ -68,22 +95,14 @@ pub async fn handle_cpp_config(
         exact_length: Some(data.len()),
     });
 
-    match CollectBytes(req.body(data)).await {
-        Ok(bytes) => match direct::decode::<CppConfigResponse>(&bytes) {
-            Ok(DecodedMessage::Protobuf(data)) => Ok(Json(data)),
-            Ok(DecodedMessage::Text(s)) => Err(__unwrap!(
-                Response::builder()
-                    .header(CONTENT_TYPE, JSON)
-                    .header(CONTENT_LENGTH, s.len())
-                    .body(Body::from(s))
-            )),
-            Err(DecoderError::Internal(e)) => Err(ChatError::ProcessingFailed(Cow::Borrowed(e))
-                .into_generic_tuple()
-                .into_response()),
+    match CollectBytesParts(req.body(data)).await {
+        Ok((parts, bytes)) => match direct::decode::<CppConfigResponse>(&parts.headers, &bytes) {
+            Ok(Ok(data)) => Ok(InfallibleJson(data)),
+            Ok(Err(cursor_err)) => Err(cursor_err.canonical().into_generic_tuple()),
+            Err(e) => Err(e.into_generic_tuple()),
         },
         Err(e) => {
             let e = e.without_url();
-
             Err(ChatError::RequestFailed(
                 if e.is_timeout() {
                     StatusCode::GATEWAY_TIMEOUT
@@ -92,8 +111,7 @@ pub async fn handle_cpp_config(
                 },
                 Cow::Owned(e.to_string()),
             )
-            .into_generic_tuple()
-            .into_response())
+            .into_generic_tuple())
         }
     }
 }
@@ -101,7 +119,8 @@ pub async fn handle_cpp_config(
 pub async fn handle_cpp_models(
     mut headers: HeaderMap,
     mut extensions: Extensions,
-) -> Result<Json<AvailableCppModelsResponse>, Response> {
+) -> Result<InfallibleJson<AvailableCppModelsResponse>, (StatusCode, InfallibleJson<GenericError>)>
+{
     let (ext_token, use_pri) = __unwrap!(extensions.remove::<TokenBundle>());
 
     let req = build_client_request(AiServiceRequest {
@@ -116,22 +135,16 @@ pub async fn handle_cpp_models(
         exact_length: Some(0),
     });
 
-    match CollectBytes(req).await {
-        Ok(bytes) => match direct::decode::<AvailableCppModelsResponse>(&bytes) {
-            Ok(DecodedMessage::Protobuf(data)) => Ok(Json(data)),
-            Ok(DecodedMessage::Text(s)) => Err(__unwrap!(
-                Response::builder()
-                    .header(CONTENT_TYPE, JSON)
-                    .header(CONTENT_LENGTH, s.len())
-                    .body(Body::from(s))
-            )),
-            Err(DecoderError::Internal(e)) => Err(ChatError::ProcessingFailed(Cow::Borrowed(e))
-                .into_generic_tuple()
-                .into_response()),
-        },
+    match CollectBytesParts(req).await {
+        Ok((parts, bytes)) => {
+            match direct::decode::<AvailableCppModelsResponse>(&parts.headers, &bytes) {
+                Ok(Ok(data)) => Ok(InfallibleJson(data)),
+                Ok(Err(cursor_err)) => Err(cursor_err.canonical().into_generic_tuple()),
+                Err(e) => Err(e.into_generic_tuple()),
+            }
+        }
         Err(e) => {
             let e = e.without_url();
-
             Err(ChatError::RequestFailed(
                 if e.is_timeout() {
                     StatusCode::GATEWAY_TIMEOUT
@@ -140,24 +153,15 @@ pub async fn handle_cpp_models(
                 },
                 Cow::Owned(e.to_string()),
             )
-            .into_generic_tuple()
-            .into_response())
+            .into_generic_tuple())
         }
     }
 }
 
-const TO_REMOVE_HEADERS: [http::HeaderName; 5] = [
-    CONTENT_TYPE,
-    CONTENT_LENGTH,
-    VARY,
-    ACCESS_CONTROL_ALLOW_CREDENTIALS,
-    ACCESS_CONTROL_ALLOW_HEADERS,
-];
-
 pub async fn handle_upload_file(
     mut headers: HeaderMap,
     mut extensions: Extensions,
-    Json(request): Json<FsUploadFileRequest>,
+    GenericJson(request): GenericJson<FsUploadFileRequest>,
 ) -> Result<Response, Response> {
     let (ext_token, use_pri) = __unwrap!(extensions.remove::<TokenBundle>());
 
@@ -178,48 +182,41 @@ pub async fn handle_upload_file(
         exact_length: Some(data.len()),
     });
 
-    let e = match CollectBytesParts(req.body(data)).await {
-        Ok((mut parts, bytes)) => {
-            for key in TO_REMOVE_HEADERS {
-                let _ = parts.headers.remove(key);
-            }
-            return match direct::decode::<FsUploadFileResponse>(&bytes) {
-                Ok(DecodedMessage::Protobuf(data)) => Ok(Response::from_parts(
-                    parts,
-                    Body::from(__unwrap!(serde_json::to_vec(&data))),
-                )),
-                Ok(DecodedMessage::Text(s)) => Err(__unwrap!(
-                    Response::builder()
-                        .header(CONTENT_TYPE, JSON)
-                        .header(CONTENT_LENGTH, s.len())
-                        .body(Body::from(s))
-                )),
-                Err(DecoderError::Internal(e)) => {
-                    Err(ChatError::ProcessingFailed(Cow::Borrowed(e))
-                        .into_generic_tuple()
-                        .into_response())
+    match CollectBytesParts(req.body(data)).await {
+        Ok((parts, bytes)) => {
+            match direct::decode::<FsUploadFileResponse>(&parts.headers, &bytes) {
+                Ok(Ok(data)) => {
+                    let body = __unwrap!(serde_json::to_vec(&data));
+                    Ok(json_response_with_upstream_parts(parts, body))
                 }
-            };
+                Ok(Err(cursor_err)) => {
+                    let body =
+                        __unwrap!(serde_json::to_vec(&cursor_err.canonical().into_generic()));
+                    Err(json_response_with_upstream_parts(parts, body))
+                }
+                Err(e) => Err(e.into_generic_tuple().into_response()),
+            }
         }
-        Err(e) => e,
-    };
-    let e = e.without_url();
-    Err(ChatError::RequestFailed(
-        if e.is_timeout() {
-            StatusCode::GATEWAY_TIMEOUT
-        } else {
-            StatusCode::INTERNAL_SERVER_ERROR
-        },
-        Cow::Owned(e.to_string()),
-    )
-    .into_generic_tuple()
-    .into_response())
+        Err(e) => {
+            let e = e.without_url();
+            Err(ChatError::RequestFailed(
+                if e.is_timeout() {
+                    StatusCode::GATEWAY_TIMEOUT
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                },
+                Cow::Owned(e.to_string()),
+            )
+            .into_generic_tuple()
+            .into_response())
+        }
+    }
 }
 
 pub async fn handle_sync_file(
     mut headers: HeaderMap,
     mut extensions: Extensions,
-    Json(request): Json<FsSyncFileRequest>,
+    GenericJson(request): GenericJson<FsSyncFileRequest>,
 ) -> Result<Response, Response> {
     let (ext_token, use_pri) = __unwrap!(extensions.remove::<TokenBundle>());
 
@@ -240,49 +237,39 @@ pub async fn handle_sync_file(
         exact_length: Some(data.len()),
     });
 
-    let e = match CollectBytesParts(req.body(data)).await {
-        Ok((mut parts, bytes)) => {
-            for key in TO_REMOVE_HEADERS {
-                let _ = parts.headers.remove(key);
+    match CollectBytesParts(req.body(data)).await {
+        Ok((parts, bytes)) => match direct::decode::<FsSyncFileResponse>(&parts.headers, &bytes) {
+            Ok(Ok(data)) => {
+                let body = __unwrap!(serde_json::to_vec(&data));
+                Ok(json_response_with_upstream_parts(parts, body))
             }
-            return match direct::decode::<FsSyncFileResponse>(&bytes) {
-                Ok(DecodedMessage::Protobuf(data)) => Ok(Response::from_parts(
-                    parts,
-                    Body::from(__unwrap!(serde_json::to_vec(&data))),
-                )),
-                Ok(DecodedMessage::Text(s)) => Err(__unwrap!(
-                    Response::builder()
-                        .header(CONTENT_TYPE, JSON)
-                        .header(CONTENT_LENGTH, s.len())
-                        .body(Body::from(s))
-                )),
-                Err(DecoderError::Internal(e)) => {
-                    Err(ChatError::ProcessingFailed(Cow::Borrowed(e))
-                        .into_generic_tuple()
-                        .into_response())
-                }
-            };
-        }
-        Err(e) => e,
-    };
-    let e = e.without_url();
-    Err(ChatError::RequestFailed(
-        if e.is_timeout() {
-            StatusCode::GATEWAY_TIMEOUT
-        } else {
-            StatusCode::INTERNAL_SERVER_ERROR
+            Ok(Err(cursor_err)) => {
+                let body = __unwrap!(serde_json::to_vec(&cursor_err.canonical().into_generic()));
+                Err(json_response_with_upstream_parts(parts, body))
+            }
+            Err(e) => Err(e.into_generic_tuple().into_response()),
         },
-        Cow::Owned(e.to_string()),
-    )
-    .into_generic_tuple()
-    .into_response())
+        Err(e) => {
+            let e = e.without_url();
+            Err(ChatError::RequestFailed(
+                if e.is_timeout() {
+                    StatusCode::GATEWAY_TIMEOUT
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                },
+                Cow::Owned(e.to_string()),
+            )
+            .into_generic_tuple()
+            .into_response())
+        }
+    }
 }
 
 pub async fn handle_stream_cpp(
     mut headers: HeaderMap,
     mut extensions: Extensions,
-    Json(request): Json<StreamCppRequest>,
-) -> Result<Response, (StatusCode, Json<GenericError>)> {
+    GenericJson(request): GenericJson<StreamCppRequest>,
+) -> Result<Response, (StatusCode, InfallibleJson<GenericError>)> {
     let (ext_token, use_pri) = __unwrap!(extensions.remove::<TokenBundle>());
 
     let data = match encode_message_framed(&request) {
@@ -319,7 +306,7 @@ pub async fn handle_stream_cpp(
         }
     };
 
-    // SSE 事件格式化
+    // Format SSE events.
     #[inline]
     fn format_sse_event(vector: &mut Vec<u8>, message: &StreamMessage) {
         vector.extend_from_slice(b"event: ");

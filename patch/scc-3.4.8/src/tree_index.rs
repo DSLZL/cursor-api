@@ -16,7 +16,7 @@ use std::sync::atomic::Ordering::{AcqRel, Acquire};
 
 use sdd::{AtomicShared, Ptr, Shared, Tag};
 
-use crate::async_helper::AsyncPager;
+use crate::utils::{AsyncPager, deref_unchecked, drop_in_place};
 use crate::{Comparable, Guard};
 use leaf::Iter as LeafIter;
 use leaf::RevIter as LeafRevIter;
@@ -159,7 +159,12 @@ impl<K, V> TreeIndex<K, V> {
     /// ```
     #[inline]
     pub fn clear(&self) {
-        self.root.swap((None, Tag::None), Acquire);
+        let Some(root) = self.root.swap((None, Tag::None), Acquire).0 else {
+            return;
+        };
+        let guard = Guard::new();
+        root.clear(&guard);
+        guard.accelerate();
     }
 
     /// Returns the depth of the [`TreeIndex`].
@@ -176,10 +181,7 @@ impl<K, V> TreeIndex<K, V> {
     #[must_use]
     pub fn depth(&self) -> usize {
         let guard = Guard::new();
-        self.root
-            .load(Acquire, &guard)
-            .as_ref()
-            .map_or(0, |root| root.depth(1, &guard))
+        deref_unchecked(self.root.load(Acquire, &guard)).map_or(0, |root| root.depth(1, &guard))
     }
 }
 
@@ -209,7 +211,7 @@ where
             {
                 let guard = Guard::new();
                 let root_ptr = self.root.load(Acquire, &guard);
-                if let Some(root) = root_ptr.as_ref() {
+                if let Some(root) = deref_unchecked(root_ptr) {
                     match root.insert(key, val, &mut pinned_pager, &guard) {
                         Ok(r) => match r {
                             InsertResult::Success => return Ok(()),
@@ -235,9 +237,7 @@ where
                     Acquire,
                     &guard,
                 ) {
-                    unsafe {
-                        let _: bool = new_node.drop_in_place();
-                    }
+                    drop_in_place(new_node);
                     continue;
                 }
             };
@@ -267,7 +267,7 @@ where
         loop {
             let guard = Guard::new();
             let root_ptr = self.root.load(Acquire, &guard);
-            if let Some(root) = root_ptr.as_ref() {
+            if let Some(root) = deref_unchecked(root_ptr) {
                 match root.insert(key, val, &mut (), &guard) {
                     Ok(r) => match r {
                         InsertResult::Success => return Ok(()),
@@ -292,9 +292,7 @@ where
                 Acquire,
                 &guard,
             ) {
-                unsafe {
-                    let _: bool = new_node.drop_in_place();
-                }
+                drop_in_place(new_node);
             }
         }
     }
@@ -370,7 +368,7 @@ where
         loop {
             {
                 let guard = Guard::new();
-                if let Some(root) = self.root.load(Acquire, &guard).as_ref() {
+                if let Some(root) = deref_unchecked(self.root.load(Acquire, &guard)) {
                     if let Ok(result) =
                         root.remove_if::<_, _, _>(key, &mut condition, &mut pinned_pager, &guard)
                     {
@@ -428,7 +426,7 @@ where
         let mut removed = false;
         loop {
             let guard = Guard::new();
-            if let Some(root) = self.root.load(Acquire, &guard).as_ref() {
+            if let Some(root) = deref_unchecked(self.root.load(Acquire, &guard)) {
                 if let Ok(result) = root.remove_if::<_, _, _>(key, &mut condition, &mut (), &guard)
                 {
                     match result {
@@ -495,7 +493,7 @@ where
                 // Remove internal nodes, and individual entries in affected leaves.
                 //
                 // It takes O(N) to traverse sub-trees on the range border.
-                if let Some(root) = self.root.load(Acquire, &guard).as_ref() {
+                if let Some(root) = deref_unchecked(self.root.load(Acquire, &guard)) {
                     if let Ok(num_children) = root.remove_range(
                         &range,
                         start_unbounded,
@@ -560,7 +558,7 @@ where
         // Remove internal nodes, and individual entries in affected leaves.
         //
         // It takes O(N) to traverse sub-trees on the range border.
-        while let Some(root) = self.root.load(Acquire, &guard).as_ref() {
+        while let Some(root) = deref_unchecked(self.root.load(Acquire, &guard)) {
             if let Ok(num_children) =
                 root.remove_range(&range, start_unbounded, None, None, &mut (), &guard)
             {
@@ -605,7 +603,7 @@ where
     where
         Q: Comparable<K> + ?Sized,
     {
-        if let Some(root) = self.root.load(Acquire, guard).as_ref() {
+        if let Some(root) = deref_unchecked(self.root.load(Acquire, guard)) {
             return root.search_value(key, guard);
         }
         None
@@ -685,7 +683,7 @@ where
     where
         Q: Comparable<K> + ?Sized,
     {
-        if let Some(root) = self.root.load(Acquire, guard).as_ref() {
+        if let Some(root) = deref_unchecked(self.root.load(Acquire, guard)) {
             return root.search_entry(key, guard);
         }
         None
@@ -723,7 +721,7 @@ where
         loop {
             {
                 let guard = Guard::new();
-                if let Some(root) = self.root.load(Acquire, &guard).as_ref() {
+                if let Some(root) = deref_unchecked(self.root.load(Acquire, &guard)) {
                     match root.read_entry(key, reader, &mut pinned_pager, &guard) {
                         Ok(r) => return r,
                         Err(f) => reader = f,
@@ -764,7 +762,7 @@ where
     {
         loop {
             let guard = Guard::new();
-            if let Some(root) = self.root.load(Acquire, &guard).as_ref() {
+            if let Some(root) = deref_unchecked(self.root.load(Acquire, &guard)) {
                 match root.read_entry(key, reader, &mut (), &guard) {
                     Ok(r) => return r,
                     Err(f) => reader = f,
@@ -939,7 +937,7 @@ where
     where
         Q: Comparable<K> + ?Sized,
     {
-        if let Some(root) = self.root.load(Acquire, guard).as_ref() {
+        if let Some(root) = deref_unchecked(self.root.load(Acquire, guard)) {
             if let Some(mut iter) = root.approximate::<_, true>(key, guard) {
                 // Found a key that exactly matches the specified one or smaller.
                 let mut prev_iter = iter.clone();
@@ -1043,7 +1041,7 @@ where
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let guard = Guard::new();
         f.write_str("TreeIndex { ")?;
-        if let Some(root) = self.root.load(Acquire, &guard).as_ref() {
+        if let Some(root) = deref_unchecked(self.root.load(Acquire, &guard)) {
             f.write_str(" root: ")?;
             root.fmt(f)?;
         }
@@ -1064,6 +1062,16 @@ impl<K, V> Default for TreeIndex<K, V> {
     #[inline]
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl<K, V> Drop for TreeIndex<K, V> {
+    #[inline]
+    fn drop(&mut self) {
+        self.clear();
+        for _ in 0..4 {
+            Guard::new().accelerate();
+        }
     }
 }
 
@@ -1257,7 +1265,7 @@ where
     fn next_back(&mut self) -> Option<Self::Item> {
         // Start iteration.
         if self.backward.is_none() {
-            let root = self.root.load(Acquire, self.guard).as_ref()?;
+            let root = deref_unchecked(self.root.load(Acquire, self.guard))?;
             if let Some(rev_iter) = root.max(self.guard) {
                 self.backward.replace(rev_iter);
             }
@@ -1298,7 +1306,7 @@ where
     fn next(&mut self) -> Option<Self::Item> {
         // Start iteration.
         if self.forward.is_none() {
-            let root = self.root.load(Acquire, self.guard).as_ref()?;
+            let root = deref_unchecked(self.root.load(Acquire, self.guard))?;
             if let Some(iter) = root.min(self.guard) {
                 self.forward.replace(iter);
             }
@@ -1505,7 +1513,7 @@ where
 
     /// Starts forward iteration.
     fn start_forward(&mut self) -> Option<(&'g K, &'g V)> {
-        let root = self.root.load(Acquire, self.guard).as_ref()?;
+        let root = deref_unchecked(self.root.load(Acquire, self.guard))?;
         let mut leaf_iter = match self.bounds.start_bound() {
             Excluded(k) | Included(k) => root.approximate::<_, true>(k, self.guard),
             Unbounded => None,
@@ -1541,7 +1549,7 @@ where
 
     /// Starts backward iteration.
     fn start_backward(&mut self) -> Option<(&'g K, &'g V)> {
-        let root = self.root.load(Acquire, self.guard).as_ref()?;
+        let root = deref_unchecked(self.root.load(Acquire, self.guard))?;
         let mut leaf_iter = match self.bounds.end_bound() {
             Excluded(k) | Included(k) => root
                 .approximate::<_, false>(k, self.guard)

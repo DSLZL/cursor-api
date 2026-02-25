@@ -1,4 +1,7 @@
-use crate::{app::constant::COMMA, core::constant::Models};
+use crate::{
+    app::{constant::COMMA, route::InfallibleSerialize},
+    core::constant::Models,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize)]
@@ -60,6 +63,8 @@ pub enum BuildKeyResponse {
     Error(&'static str),
 }
 
+unsafe impl InfallibleSerialize for BuildKeyResponse {}
+
 #[derive(Deserialize)]
 pub struct GetConfigVersionRequest {
     pub token: super::RawToken,
@@ -77,3 +82,5 @@ pub enum GetConfigVersionResponse {
     ConfigVersion(uuid::Uuid),
     Error(&'static str),
 }
+
+unsafe impl InfallibleSerialize for GetConfigVersionResponse {}

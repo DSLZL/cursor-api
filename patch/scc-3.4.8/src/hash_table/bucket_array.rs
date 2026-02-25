@@ -19,7 +19,6 @@ pub struct BucketArray<K, V, L: LruList, const TYPE: char> {
     array_len: usize,
     hash_offset: u8,
     sample_size: u8,
-    bucket_ptr_offset: u16,
     linked_array: AtomicShared<BucketArray<K, V, L, TYPE>>,
     num_cleared_buckets: AtomicUsize,
 }
@@ -41,24 +40,13 @@ impl<K, V, L: LruList, const TYPE: char> BucketArray<K, V, L, TYPE> {
         assert_eq!(1_usize << log2_array_len, array_len);
 
         let sample_size = log2_array_len.next_power_of_two();
-        let alignment = align_of::<Bucket<K, V, L, TYPE>>();
         let layout = Self::bucket_array_layout(array_len);
 
         unsafe {
-            let Some(unaligned_bucket_array_ptr) = NonNull::new(alloc_zeroed(layout)) else {
+            let Some(bucket_array_ptr) = NonNull::new(alloc_zeroed(layout)) else {
                 panic!("memory allocation failure: {layout:?}");
             };
-            let bucket_array_ptr_offset = unaligned_bucket_array_ptr.align_offset(alignment);
-            assert_eq!(
-                (unaligned_bucket_array_ptr.addr().get() + bucket_array_ptr_offset) % alignment,
-                0
-            );
 
-            #[allow(clippy::cast_ptr_alignment)] // The alignment was just asserted.
-            let buckets = unaligned_bucket_array_ptr
-                .add(bucket_array_ptr_offset)
-                .cast::<Bucket<K, V, L, TYPE>>();
-            let bucket_array_ptr_offset = u16::try_from(bucket_array_ptr_offset).unwrap_or(0);
             let data_block_array_layout = Layout::from_size_align(
                 size_of::<DataBlock<K, V, BUCKET_LEN>>() * array_len,
                 align_of::<[DataBlock<K, V, BUCKET_LEN>; 0]>(),
@@ -67,7 +55,7 @@ impl<K, V, L: LruList, const TYPE: char> BucketArray<K, V, L, TYPE> {
 
             // In case the below data block allocation fails, deallocate the bucket array.
             let alloc_guard = ExitGuard::new((), |()| {
-                dealloc(unaligned_bucket_array_ptr.cast::<u8>().as_ptr(), layout);
+                dealloc(bucket_array_ptr.as_ptr(), layout);
             });
 
             let Some(data_blocks) =
@@ -84,12 +72,11 @@ impl<K, V, L: LruList, const TYPE: char> BucketArray<K, V, L, TYPE> {
             }
 
             Self {
-                buckets,
+                buckets: bucket_array_ptr.cast::<Bucket<K, V, L, TYPE>>(),
                 data_blocks,
                 array_len,
                 hash_offset: u8::try_from(u64::BITS).unwrap_or(64) - log2_array_len,
                 sample_size,
-                bucket_ptr_offset: bucket_array_ptr_offset,
                 linked_array,
                 num_cleared_buckets: AtomicUsize::new(0),
             }
@@ -246,10 +233,10 @@ impl<K, V, L: LruList, const TYPE: char> BucketArray<K, V, L, TYPE> {
     /// Calculates the layout of the memory block for an array of `T`.
     #[inline]
     const fn bucket_array_layout(array_len: usize) -> Layout {
-        let size_of_t = size_of::<Bucket<K, V, L, TYPE>>();
-        let allocation_size = (array_len + 1) * size_of_t;
-        // Intentionally misaligned in order to take full advantage of demand paging.
-        unsafe { Layout::from_size_align_unchecked(allocation_size, 1) }
+        let allocation_size = array_len * size_of::<Bucket<K, V, L, TYPE>>();
+        unsafe {
+            Layout::from_size_align_unchecked(allocation_size, align_of::<Bucket<K, V, L, TYPE>>())
+        }
     }
 }
 
@@ -282,10 +269,7 @@ impl<K, V, L: LruList, const TYPE: char> Drop for BucketArray<K, V, L, TYPE> {
 
         unsafe {
             dealloc(
-                self.buckets
-                    .cast::<u8>()
-                    .sub(self.bucket_ptr_offset as usize)
-                    .as_ptr(),
+                self.buckets.cast::<u8>().as_ptr(),
                 Self::bucket_array_layout(self.array_len),
             );
             dealloc(

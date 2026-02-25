@@ -57,6 +57,6 @@ prost-derive = { version = "0.14.3", path = "../prost-derive", optional = true }
 proto-value = { version = "0.1.0", path = "../../crates/proto-value", default-features = false }
 
 [dev-dependencies]
-criterion = { version = "0.7", default-features = false }
+criterion = { version = "0.8", default-features = false }
 proptest = "1"
-rand = "0.9"
+rand = "0.10"

@@ -1,6 +1,7 @@
 use crate::app::{
     constant::header::HEADER_VALUE_TEXT_PLAIN_UTF8,
     model::{Checksum, Hash, timestamp_header},
+    route::{InfallibleJson, InfallibleSerialize},
 };
 use axum::{
     body::Body,
@@ -60,8 +61,10 @@ impl serde::Serialize for NtpSyncResult {
     }
 }
 
-pub async fn handle_ntp_sync_once() -> axum::Json<NtpSyncResult> {
-    axum::Json(match crate::common::model::ntp::sync_once().await {
+unsafe impl InfallibleSerialize for NtpSyncResult {}
+
+pub async fn handle_ntp_sync_once() -> InfallibleJson<NtpSyncResult> {
+    InfallibleJson(match crate::common::model::ntp::sync_once().await {
         Ok(delta_nanos) => {
             crate::common::model::ntp::DELTA
                 .store(delta_nanos, core::sync::atomic::Ordering::Relaxed);

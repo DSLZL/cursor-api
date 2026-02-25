@@ -2,6 +2,7 @@ use super::{
     ApiStatus, DeleteResponseExpectation,
     proxy_pool::{Proxies, SingleProxy},
 };
+use crate::app::route::InfallibleSerialize;
 use interned::Str;
 use serde::{Deserialize, Serialize};
 use std::{borrow::Cow, sync::Arc};
@@ -21,6 +22,8 @@ pub struct ProxyInfoResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<Cow<'static, str>>,
 }
+
+unsafe impl InfallibleSerialize for ProxyInfoResponse {}
 
 // 更新代理配置请求
 pub type ProxyUpdateRequest = Proxies;
@@ -49,6 +52,8 @@ pub struct ProxiesDeleteResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failed_names: Option<Vec<String>>,
 }
+
+unsafe impl InfallibleSerialize for ProxiesDeleteResponse {}
 
 // 设置通用代理请求
 #[derive(Deserialize)]

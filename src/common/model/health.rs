@@ -1,6 +1,6 @@
 use super::ApiStatus;
 use crate::{
-    app::model::DateTime,
+    app::{model::DateTime, route::InfallibleSerialize},
     common::model::raw_json::{RawJson, serialize_as_option_raw_value, serialize_as_raw_value},
 };
 use serde::Serialize;
@@ -19,6 +19,8 @@ pub struct HealthCheckResponse {
     pub system: Option<SystemStats>,
     pub capabilities: Capabilities,
 }
+
+unsafe impl InfallibleSerialize for HealthCheckResponse {}
 
 #[derive(Serialize)]
 pub struct ServiceInfo {

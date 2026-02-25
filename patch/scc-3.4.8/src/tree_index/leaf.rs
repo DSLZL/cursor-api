@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 use std::fmt;
-use std::mem::{forget, needs_drop};
+use std::mem::{ManuallyDrop, forget, needs_drop};
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::{Deref, RangeBounds};
 use std::ptr;
@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicPtr, AtomicUsize};
 use saa::Lock;
 
 use crate::data_block::DataBlock;
+use crate::utils::take_snapshot;
 use crate::{Comparable, Guard};
 #[cfg(feature = "loom")]
 use loom::sync::atomic::{AtomicPtr, AtomicUsize};
@@ -670,13 +671,11 @@ where
                 metadata = interim_metadata;
 
                 // Write the key and value into the data block.
-                unsafe {
-                    self.data_block.write(
-                        free_pos as usize,
-                        ptr::read(ptr::from_ref(&key)),
-                        ptr::read(ptr::from_ref(&val)),
-                    );
-                }
+                self.data_block.write(
+                    free_pos as usize,
+                    ManuallyDrop::into_inner(take_snapshot(&key)),
+                    ManuallyDrop::into_inner(take_snapshot(&val)),
+                );
                 reserved = true;
             }
 
@@ -944,10 +943,10 @@ impl<K, V> Drop for Array<K, V> {
 }
 
 impl Dimension {
-    /// Flags indicating that the [`Array`] is frozen.
+    /// Flag indicating that the [`Array`] is frozen.
     const FROZEN: usize = 1_usize << (usize::BITS - 1);
 
-    /// Flags indicating that the [`Array`] is retired.
+    /// Flag indicating that the [`Array`] is retired.
     const RETIRED: usize = 1_usize << (usize::BITS - 2);
 
     /// Returns a bit mask for an array state.

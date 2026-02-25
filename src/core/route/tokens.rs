@@ -8,11 +8,12 @@ use crate::{
             TokensGetResponse, TokensMergeRequest, TokensProxySetRequest, TokensStatusSetRequest,
             TokensTimezoneSetRequest, TokensUpdateRequest,
         },
+        route::{GenericJson, InfallibleJson},
     },
     common::model::{ApiStatus, GenericError},
 };
 use alloc::{borrow::Cow, sync::Arc};
-use axum::{Json, extract::State};
+use axum::extract::State;
 use core::str::FromStr as _;
 use http::StatusCode;
 use interned::ArcStr;
@@ -43,16 +44,18 @@ crate::define_typed_constants! {
     }
 }
 
-pub async fn handle_get_tokens(State(state): State<Arc<AppState>>) -> Json<TokensGetResponse> {
+pub async fn handle_get_tokens(
+    State(state): State<Arc<AppState>>,
+) -> InfallibleJson<TokensGetResponse> {
     let tokens = state.token_manager_read().await.list();
 
-    Json(TokensGetResponse { tokens })
+    InfallibleJson(TokensGetResponse { tokens })
 }
 
 pub async fn handle_set_tokens(
     State(state): State<Arc<AppState>>,
-    Json(tokens): Json<TokensUpdateRequest>,
-) -> Result<Json<TokensAddResponse>, StatusCode> {
+    GenericJson(tokens): GenericJson<TokensUpdateRequest>,
+) -> Result<InfallibleJson<TokensAddResponse>, StatusCode> {
     // 获取写锁并更新token manager
     let mut token_manager = state.token_manager_write().await;
     *token_manager = TokenManager::new(tokens.len());
@@ -64,7 +67,7 @@ pub async fn handle_set_tokens(
     // 保存到文件
     token_manager.save().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    Ok(Json(TokensAddResponse {
+    Ok(InfallibleJson(TokensAddResponse {
         tokens_count,
         message: "Token files have been updated and reloaded",
     }))
@@ -72,8 +75,8 @@ pub async fn handle_set_tokens(
 
 pub async fn handle_add_tokens(
     State(state): State<Arc<AppState>>,
-    Json(request): Json<TokensAddRequest>,
-) -> Result<Json<TokensAddResponse>, (StatusCode, Json<GenericError>)> {
+    GenericJson(request): GenericJson<TokensAddRequest>,
+) -> Result<InfallibleJson<TokensAddResponse>, (StatusCode, InfallibleJson<GenericError>)> {
     // 获取token manager的写锁
     let mut token_manager = state.token_manager_write().await;
 
@@ -145,7 +148,7 @@ pub async fn handle_add_tokens(
         token_manager.save().await.map_err(|_| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(GenericError {
+                InfallibleJson(GenericError {
                     status: ApiStatus::Error,
                     code: None,
                     error: Some(Cow::Borrowed(ERROR_SAVE_TOKEN_DATA)),
@@ -154,7 +157,7 @@ pub async fn handle_add_tokens(
             )
         })?;
 
-        Ok(Json(TokensAddResponse {
+        Ok(InfallibleJson(TokensAddResponse {
             tokens_count,
             message: "New tokens have been added and reloaded",
         }))
@@ -162,14 +165,14 @@ pub async fn handle_add_tokens(
         // 如果没有新tokens，返回当前状态
         let tokens_count = token_manager.tokens().len();
 
-        Ok(Json(TokensAddResponse { tokens_count, message: "No new tokens were added" }))
+        Ok(InfallibleJson(TokensAddResponse { tokens_count, message: "No new tokens were added" }))
     }
 }
 
 pub async fn handle_delete_tokens(
     State(state): State<Arc<AppState>>,
-    Json(request): Json<TokensDeleteRequest>,
-) -> Result<Json<TokensDeleteResponse>, (StatusCode, Json<GenericError>)> {
+    GenericJson(request): GenericJson<TokensDeleteRequest>,
+) -> Result<InfallibleJson<TokensDeleteResponse>, (StatusCode, InfallibleJson<GenericError>)> {
     let mut token_manager = state.token_manager_write().await;
 
     // 一次遍历完成删除和失败记录
@@ -199,7 +202,7 @@ pub async fn handle_delete_tokens(
         token_manager.save().await.map_err(|_| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(GenericError {
+                InfallibleJson(GenericError {
                     status: ApiStatus::Success,
                     code: None,
                     error: Some(Cow::Borrowed(ERROR_SAVE_TOKEN_DATA)),
@@ -209,18 +212,18 @@ pub async fn handle_delete_tokens(
         })?;
     }
 
-    Ok(Json(TokensDeleteResponse { status: ApiStatus::Success, failed_tokens }))
+    Ok(InfallibleJson(TokensDeleteResponse { status: ApiStatus::Success, failed_tokens }))
 }
 
 pub async fn handle_update_tokens_profile(
     State(state): State<Arc<AppState>>,
-    Json(aliases): Json<HashSet<String>>,
-) -> Result<Json<CommonResponse>, (StatusCode, Json<GenericError>)> {
+    GenericJson(aliases): GenericJson<HashSet<String>>,
+) -> Result<InfallibleJson<CommonResponse>, (StatusCode, InfallibleJson<GenericError>)> {
     // 验证请求
     if aliases.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(GenericError {
+            InfallibleJson(GenericError {
                 status: ApiStatus::Error,
                 code: None,
                 error: Some(Cow::Borrowed(ERROR_NO_TOKENS_PROVIDED)),
@@ -293,7 +296,7 @@ pub async fn handle_update_tokens_profile(
     if updated_count > 0 && token_manager.save().await.is_err() {
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(GenericError {
+            InfallibleJson(GenericError {
                 status: ApiStatus::Error,
                 code: None,
                 error: Some(Cow::Borrowed(ERROR_SAVE_TOKEN_PROFILES)),
@@ -302,7 +305,7 @@ pub async fn handle_update_tokens_profile(
         ));
     }
 
-    Ok(Json(CommonResponse {
+    Ok(InfallibleJson(CommonResponse {
         status: ApiStatus::Success,
         message: Cow::Owned(
             [
@@ -319,12 +322,12 @@ pub async fn handle_update_tokens_profile(
 
 pub async fn handle_update_tokens_config_version(
     State(state): State<Arc<AppState>>,
-    Json(aliases): Json<HashSet<String>>,
-) -> Result<Json<CommonResponse>, (StatusCode, Json<GenericError>)> {
+    GenericJson(aliases): GenericJson<HashSet<String>>,
+) -> Result<InfallibleJson<CommonResponse>, (StatusCode, InfallibleJson<GenericError>)> {
     if aliases.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(GenericError {
+            InfallibleJson(GenericError {
                 status: ApiStatus::Error,
                 code: None,
                 error: Some(Cow::Borrowed(ERROR_NO_TOKENS_PROVIDED)),
@@ -370,7 +373,7 @@ pub async fn handle_update_tokens_config_version(
     if updated_count > 0 && token_manager.save().await.is_err() {
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(GenericError {
+            InfallibleJson(GenericError {
                 status: ApiStatus::Error,
                 code: None,
                 error: Some(Cow::Borrowed(ERROR_SAVE_TOKEN_PROFILES)),
@@ -401,17 +404,17 @@ pub async fn handle_update_tokens_config_version(
         .concat()
     };
 
-    Ok(Json(CommonResponse { status: ApiStatus::Success, message: Cow::Owned(message) }))
+    Ok(InfallibleJson(CommonResponse { status: ApiStatus::Success, message: Cow::Owned(message) }))
 }
 
 pub async fn handle_refresh_tokens(
     State(state): State<Arc<AppState>>,
-    Json(aliases): Json<HashSet<String>>,
-) -> Result<Json<CommonResponse>, (StatusCode, Json<GenericError>)> {
+    GenericJson(aliases): GenericJson<HashSet<String>>,
+) -> Result<InfallibleJson<CommonResponse>, (StatusCode, InfallibleJson<GenericError>)> {
     if aliases.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(GenericError {
+            InfallibleJson(GenericError {
                 status: ApiStatus::Error,
                 code: None,
                 error: Some(Cow::Borrowed(ERROR_NO_TOKENS_PROVIDED)),
@@ -443,7 +446,7 @@ pub async fn handle_refresh_tokens(
     if updated_count > 0 && token_manager.save().await.is_err() {
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(GenericError {
+            InfallibleJson(GenericError {
                 status: ApiStatus::Error,
                 code: None,
                 error: Some(Cow::Borrowed(ERROR_SAVE_TOKENS)),
@@ -452,7 +455,7 @@ pub async fn handle_refresh_tokens(
         ));
     }
 
-    Ok(Json(CommonResponse {
+    Ok(InfallibleJson(CommonResponse {
         status: ApiStatus::Success,
         message: Cow::Owned(
             [
@@ -469,13 +472,13 @@ pub async fn handle_refresh_tokens(
 
 pub async fn handle_set_tokens_status(
     State(state): State<Arc<AppState>>,
-    Json(request): Json<TokensStatusSetRequest>,
-) -> Result<Json<CommonResponse>, (StatusCode, Json<GenericError>)> {
+    GenericJson(request): GenericJson<TokensStatusSetRequest>,
+) -> Result<InfallibleJson<CommonResponse>, (StatusCode, InfallibleJson<GenericError>)> {
     // 验证请求
     if request.aliases.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(GenericError {
+            InfallibleJson(GenericError {
                 status: ApiStatus::Error,
                 code: None,
                 error: Some(Cow::Borrowed(ERROR_NO_TOKENS_PROVIDED)),
@@ -510,7 +513,7 @@ pub async fn handle_set_tokens_status(
     if updated_count > 0 && token_manager.save().await.is_err() {
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(GenericError {
+            InfallibleJson(GenericError {
                 status: ApiStatus::Error,
                 code: None,
                 error: Some(Cow::Borrowed(ERROR_SAVE_TOKEN_STATUSES)),
@@ -519,7 +522,7 @@ pub async fn handle_set_tokens_status(
         ));
     }
 
-    Ok(Json(CommonResponse {
+    Ok(InfallibleJson(CommonResponse {
         status: ApiStatus::Success,
         message: Cow::Owned(
             [
@@ -536,13 +539,13 @@ pub async fn handle_set_tokens_status(
 
 pub async fn handle_set_tokens_alias(
     State(state): State<Arc<AppState>>,
-    Json(request): Json<TokensAliasSetRequest>,
-) -> Result<Json<CommonResponse>, (StatusCode, Json<GenericError>)> {
+    GenericJson(request): GenericJson<TokensAliasSetRequest>,
+) -> Result<InfallibleJson<CommonResponse>, (StatusCode, InfallibleJson<GenericError>)> {
     // 验证请求
     if request.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(GenericError {
+            InfallibleJson(GenericError {
                 status: ApiStatus::Error,
                 code: None,
                 error: Some(Cow::Borrowed(ERROR_NO_TOKENS_PROVIDED)),
@@ -585,7 +588,7 @@ pub async fn handle_set_tokens_alias(
     {
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(GenericError {
+            InfallibleJson(GenericError {
                 status: ApiStatus::Error,
                 code: None,
                 error: Some(Cow::Borrowed(ERROR_SAVE_TOKEN_ALIASES)),
@@ -594,7 +597,7 @@ pub async fn handle_set_tokens_alias(
         ));
     }
 
-    Ok(Json(CommonResponse {
+    Ok(InfallibleJson(CommonResponse {
         status: ApiStatus::Success,
         message: Cow::Owned(
             [
@@ -611,13 +614,13 @@ pub async fn handle_set_tokens_alias(
 
 pub async fn handle_set_tokens_proxy(
     State(state): State<Arc<AppState>>,
-    Json(request): Json<TokensProxySetRequest>,
-) -> Result<Json<CommonResponse>, (StatusCode, Json<GenericError>)> {
+    GenericJson(request): GenericJson<TokensProxySetRequest>,
+) -> Result<InfallibleJson<CommonResponse>, (StatusCode, InfallibleJson<GenericError>)> {
     // 验证请求
     if request.aliases.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(GenericError {
+            InfallibleJson(GenericError {
                 status: ApiStatus::Error,
                 code: None,
                 error: Some(Cow::Borrowed(ERROR_NO_TOKENS_PROVIDED)),
@@ -652,7 +655,7 @@ pub async fn handle_set_tokens_proxy(
     if updated_count > 0 && token_manager.save().await.is_err() {
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(GenericError {
+            InfallibleJson(GenericError {
                 status: ApiStatus::Error,
                 code: None,
                 error: Some(Cow::Borrowed(ERROR_SAVE_TOKEN_PROXIES)),
@@ -661,7 +664,7 @@ pub async fn handle_set_tokens_proxy(
         ));
     }
 
-    Ok(Json(CommonResponse {
+    Ok(InfallibleJson(CommonResponse {
         status: ApiStatus::Success,
         message: Cow::Owned(
             [
@@ -678,13 +681,13 @@ pub async fn handle_set_tokens_proxy(
 
 pub async fn handle_set_tokens_timezone(
     State(state): State<Arc<AppState>>,
-    Json(request): Json<TokensTimezoneSetRequest>,
-) -> Result<Json<CommonResponse>, (StatusCode, Json<GenericError>)> {
+    GenericJson(request): GenericJson<TokensTimezoneSetRequest>,
+) -> Result<InfallibleJson<CommonResponse>, (StatusCode, InfallibleJson<GenericError>)> {
     // 验证请求
     if request.aliases.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(GenericError {
+            InfallibleJson(GenericError {
                 status: ApiStatus::Error,
                 code: None,
                 error: Some(Cow::Borrowed(ERROR_NO_TOKENS_PROVIDED)),
@@ -719,7 +722,7 @@ pub async fn handle_set_tokens_timezone(
     if updated_count > 0 && token_manager.save().await.is_err() {
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(GenericError {
+            InfallibleJson(GenericError {
                 status: ApiStatus::Error,
                 code: None,
                 error: Some(Cow::Borrowed(ERROR_SAVE_TOKEN_TIMEZONES)),
@@ -728,7 +731,7 @@ pub async fn handle_set_tokens_timezone(
         ));
     }
 
-    Ok(Json(CommonResponse {
+    Ok(InfallibleJson(CommonResponse {
         status: ApiStatus::Success,
         message: Cow::Owned(
             [
@@ -745,13 +748,13 @@ pub async fn handle_set_tokens_timezone(
 
 pub async fn handle_merge_tokens(
     State(state): State<Arc<AppState>>,
-    Json(request): Json<TokensMergeRequest>,
-) -> Result<Json<CommonResponse>, (StatusCode, Json<GenericError>)> {
+    GenericJson(request): GenericJson<TokensMergeRequest>,
+) -> Result<InfallibleJson<CommonResponse>, (StatusCode, InfallibleJson<GenericError>)> {
     // 验证请求
     if request.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(GenericError {
+            InfallibleJson(GenericError {
                 status: ApiStatus::Error,
                 code: None,
                 error: Some(Cow::Borrowed(ERROR_NO_TOKENS_PROVIDED)),
@@ -814,7 +817,7 @@ pub async fn handle_merge_tokens(
     if updated_count > 0 && token_manager.save().await.is_err() {
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(GenericError {
+            InfallibleJson(GenericError {
                 status: ApiStatus::Error,
                 code: None,
                 error: Some(Cow::Borrowed(ERROR_SAVE_TOKENS)),
@@ -823,7 +826,7 @@ pub async fn handle_merge_tokens(
         ));
     }
 
-    Ok(Json(CommonResponse {
+    Ok(InfallibleJson(CommonResponse {
         status: ApiStatus::Success,
         message: Cow::Owned(
             [

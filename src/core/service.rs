@@ -14,6 +14,7 @@ use crate::{
             AppConfig, AppState, Chain, ChainUsage, DateTime, ErrorInfo, LogStatus, LogTokenInfo,
             LogUpdate, QueueType, RequestLog, TimingInfo, TokenKey, UsageCheck, log_manager,
         },
+        route::{AnthropicJson, InfallibleJson, OpenAiJson},
     },
     common::{
         client::{AiServiceRequest, build_client_request},
@@ -43,7 +44,6 @@ use crate::{
 use alloc::{borrow::Cow, sync::Arc};
 use atomic_enum::{Atomic, atomic_enum};
 use axum::{
-    Json,
     body::Body,
     extract::{Query, State},
     response::Response,
@@ -61,14 +61,14 @@ use http::{
 use interned::Str;
 use tokio::sync::Mutex;
 
-pub async fn handle_raw_models() -> Result<Json<RawModelsResponse>, (StatusCode, Json<GenericError>)>
-{
+pub async fn handle_raw_models()
+-> Result<InfallibleJson<RawModelsResponse>, (StatusCode, InfallibleJson<GenericError>)> {
     if let Some(available_models) = Models::get_raw_models_cache() {
-        Ok(Json(RawModelsResponse(available_models)))
+        Ok(InfallibleJson(RawModelsResponse(available_models)))
     } else {
         Err((
             StatusCode::NOT_FOUND,
-            Json(GenericError {
+            InfallibleJson(GenericError {
                 status: ApiStatus::Error,
                 code: Some(StatusCode::NOT_FOUND),
                 error: Some(Cow::Borrowed("Models data not available")),
@@ -84,7 +84,7 @@ pub async fn handle_models(
     State(state): State<Arc<AppState>>,
     headers: http::HeaderMap,
     Query(request): Query<super::aiserver::v1::AvailableModelsRequest>,
-) -> Result<Response, (StatusCode, Json<GenericError>)> {
+) -> Result<Response, (StatusCode, InfallibleJson<GenericError>)> {
     fn get_current() -> Response {
         use axum::response::IntoResponse as _;
         let content = Models::get_models_cache().into_bytes();
@@ -136,9 +136,10 @@ pub async fn handle_models(
         // 动态密钥
         if AppConfig::is_dynamic_key_enabled() {
             if let Some(parsed_config) = parse_dynamic_token(auth_token)
-                && let Some(ext_token) = parsed_config.into_tuple().and_then(tokeninfo_to_token) {
-                    return Ok((ext_token, false));
-                }
+                && let Some(ext_token) = parsed_config.into_tuple().and_then(tokeninfo_to_token)
+            {
+                return Ok((ext_token, false));
+            }
         }
 
         Err(AuthError::Unauthorized)
@@ -149,7 +150,7 @@ pub async fn handle_models(
     // 获取可用模型列表
     let models = get_available_models(ext_token, use_pri, request).await.ok_or((
         UPSTREAM_FAILURE,
-        Json(GenericError {
+        InfallibleJson(GenericError {
             status: ApiStatus::Error,
             code: Some(UPSTREAM_FAILURE),
             error: Some(Cow::Borrowed("Failed to fetch available models")),
@@ -161,7 +162,7 @@ pub async fn handle_models(
     Models::update(models).map_err(|e| {
         (
             UPSTREAM_FAILURE,
-            Json(GenericError {
+            InfallibleJson(GenericError {
                 status: ApiStatus::Error,
                 code: Some(UPSTREAM_FAILURE),
                 error: Some(Cow::Borrowed("Failed to update models")),
@@ -206,8 +207,8 @@ atomic_enum!(LastContentType = u8);
 pub async fn handle_chat_completions(
     State(state): State<Arc<AppState>>,
     mut extensions: Extensions,
-    Json(request): Json<openai::ChatCompletionCreateParams>,
-) -> Result<Response<Body>, (StatusCode, Json<OpenAiError>)> {
+    OpenAiJson(request): OpenAiJson<openai::ChatCompletionCreateParams>,
+) -> Result<Response<Body>, (StatusCode, InfallibleJson<OpenAiError>)> {
     let (ext_token, use_pri) =
         __unwrap!(extensions.remove::<TokenBundleResult>()).map_err(|e| e.into_openai_tuple())?;
 
@@ -274,7 +275,7 @@ pub async fn handle_chat_completions(
         //     state.increment_error();
         //     return Err((
         //         StatusCode::UNAUTHORIZED,
-        //         Json(ChatError::Unauthorized.to_openai()),
+        //         InfallibleJson(ChatError::Unauthorized.to_openai()),
         //     ));
         // }
 
@@ -655,7 +656,7 @@ pub async fn handle_chat_completions(
                             state.increment_error();
                             return Err((
                                 canonical.status_code(),
-                                Json(canonical.into_openai().wrapped()),
+                                InfallibleJson(canonical.into_openai().wrapped()),
                             ));
                         }
                     }
@@ -905,7 +906,7 @@ pub async fn handle_chat_completions(
                     )
                     .await;
                     state.increment_error();
-                    return Err((canonical.status_code(), Json(canonical.into_openai().wrapped())));
+                    return Err((canonical.status_code(), InfallibleJson(canonical.into_openai().wrapped())));
                 }
                 Err(StreamError::EmptyStream) => {
                     let empty_stream_count = decoder.get_empty_stream_count();
@@ -1006,8 +1007,8 @@ pub async fn handle_chat_completions(
 pub async fn handle_messages(
     State(state): State<Arc<AppState>>,
     mut extensions: Extensions,
-    Json(request): Json<anthropic::MessageCreateParams>,
-) -> Result<Response<Body>, (StatusCode, Json<AnthropicError>)> {
+    AnthropicJson(request): AnthropicJson<anthropic::MessageCreateParams>,
+) -> Result<Response<Body>, (StatusCode, InfallibleJson<AnthropicError>)> {
     let (ext_token, use_pri) = __unwrap!(extensions.remove::<TokenBundleResult>())
         .map_err(AuthError::into_anthropic_tuple)?;
 
@@ -1075,7 +1076,7 @@ pub async fn handle_messages(
         //     state.increment_error();
         //     return Err((
         //         StatusCode::UNAUTHORIZED,
-        //         Json(ChatError::Unauthorized.to_generic()),
+        //         InfallibleJson(ChatError::Unauthorized.to_generic()),
         //     ));
         // }
 
@@ -1534,7 +1535,7 @@ pub async fn handle_messages(
                             state.increment_error();
                             return Err((
                                 canonical.status_code(),
-                                Json(canonical.into_anthropic().wrapped()),
+                                InfallibleJson(canonical.into_anthropic().wrapped()),
                             ));
                         }
                     }
@@ -1803,7 +1804,7 @@ pub async fn handle_messages(
                     state.increment_error();
                     return Err((
                         canonical.status_code(),
-                        Json(canonical.into_anthropic().wrapped()),
+                        InfallibleJson(canonical.into_anthropic().wrapped()),
                     ));
                 }
                 Err(StreamError::EmptyStream) => {
@@ -1878,8 +1879,8 @@ pub async fn handle_messages(
 
 pub async fn handle_messages_count_tokens(
     mut extensions: Extensions,
-    Json(request): Json<anthropic::MessageCreateParams>,
-) -> Result<Response<Body>, (StatusCode, Json<AnthropicError>)> {
+    AnthropicJson(request): AnthropicJson<anthropic::MessageCreateParams>,
+) -> Result<Response<Body>, (StatusCode, InfallibleJson<AnthropicError>)> {
     let (ext_token, use_pri) = __unwrap!(extensions.remove::<TokenBundleResult>())
         .map_err(AuthError::into_anthropic_tuple)?;
 
@@ -1943,7 +1944,7 @@ pub async fn handle_messages_count_tokens(
                         let canonical = error.canonical();
                         return Err((
                             canonical.status_code(),
-                            Json(canonical.into_anthropic().wrapped()),
+                            InfallibleJson(canonical.into_anthropic().wrapped()),
                         ));
                     }
                     return Err(ChatError::EmptyMessages(UPSTREAM_FAILURE).into_anthropic_tuple());

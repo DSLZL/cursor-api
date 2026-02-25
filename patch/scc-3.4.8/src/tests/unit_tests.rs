@@ -73,10 +73,10 @@ mod hashmap {
 
     use super::common::{EqTest, MaybeEq, R};
     use crate::HashMap;
-    use crate::async_helper::AsyncGuard;
     use crate::data_block::DataBlock;
     use crate::hash_map::{self, Entry, ReplaceResult, Reserve};
     use crate::hash_table::bucket::{MAP, Writer};
+    use crate::utils::AsyncGuard;
 
     static_assertions::assert_eq_size!(DataBlock<u8, u64, 32>, [u64; 36]);
     static_assertions::assert_eq_size!(Option<Writer<usize, usize, (), MAP>>, usize);
@@ -2593,11 +2593,11 @@ mod treeindex {
     #[test]
     fn clear() {
         static INST_CNT: AtomicUsize = AtomicUsize::new(0);
-        let tree: TreeIndex<usize, R> = TreeIndex::default();
+        let tree: TreeIndex<String, R> = TreeIndex::default();
 
-        let workload_size = if cfg!(miri) { 256 } else { 1024 * 1024 };
+        let workload_size = 4096;
         for k in 0..workload_size {
-            assert!(tree.insert_sync(k, R::new(&INST_CNT)).is_ok());
+            assert!(tree.insert_sync(format!("{k}"), R::new(&INST_CNT)).is_ok());
         }
         assert!(INST_CNT.load(Relaxed) >= workload_size);
         assert_eq!(tree.len(), workload_size);
@@ -2630,13 +2630,13 @@ mod treeindex {
             }
         }
 
-        let data_size = 256;
-        let tree: TreeIndex<usize, R> = TreeIndex::new();
+        let data_size = 4096;
+        let tree: TreeIndex<String, R> = TreeIndex::new();
         for k in 0..data_size {
-            assert!(tree.insert_sync(k, R::new()).is_ok());
+            assert!(tree.insert_sync(format!("{k}"), R::new()).is_ok());
         }
         for k in (0..data_size).rev() {
-            assert!(tree.remove_sync(&k));
+            assert!(tree.remove_sync(&format!("{k}")));
         }
 
         let mut cnt = 0;

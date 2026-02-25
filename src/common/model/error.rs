@@ -1,7 +1,10 @@
 use super::GenericError;
-use crate::core::{
-    error::ErrorExt,
-    model::{anthropic, openai},
+use crate::{
+    app::route::InfallibleJson,
+    core::{
+        error::ErrorExt,
+        model::{anthropic, openai},
+    },
 };
 use alloc::borrow::Cow;
 use http::StatusCode;
@@ -10,7 +13,6 @@ pub enum ChatError {
     ModelNotSupported(String),
     EmptyMessages(StatusCode),
     RequestFailed(StatusCode, Cow<'static, str>),
-    ProcessingFailed(Cow<'static, str>),
 }
 
 impl ChatError {
@@ -20,7 +22,6 @@ impl ChatError {
             Self::ModelNotSupported(_) => "model_not_supported",
             Self::EmptyMessages(_) => "empty_messages",
             Self::RequestFailed(_, _) => "request_failed",
-            Self::ProcessingFailed(_) => "processing_failed",
         }
     }
 }
@@ -32,7 +33,6 @@ impl core::fmt::Display for ChatError {
             Self::ModelNotSupported(model) => write!(f, "Model '{model}' is not supported"),
             Self::EmptyMessages(_) => write!(f, "Message array cannot be empty"),
             Self::RequestFailed(_, err) => write!(f, "Request failed: {err}"),
-            Self::ProcessingFailed(err) => write!(f, "Processing failed: {err}"),
         }
     }
 }
@@ -44,7 +44,6 @@ impl ChatError {
             Self::ModelNotSupported(_) => StatusCode::BAD_REQUEST,
             Self::EmptyMessages(sc) => sc,
             Self::RequestFailed(sc, _) => sc,
-            Self::ProcessingFailed(_) => StatusCode::BAD_GATEWAY,
         }
     }
 
@@ -79,15 +78,17 @@ impl ChatError {
 
 impl ErrorExt for ChatError {
     #[inline]
-    fn into_generic_tuple(self) -> (http::StatusCode, axum::Json<GenericError>) {
-        (self.status_code(), axum::Json(self.to_generic()))
+    fn into_generic_tuple(self) -> (http::StatusCode, InfallibleJson<GenericError>) {
+        (self.status_code(), InfallibleJson(self.to_generic()))
     }
     #[inline]
-    fn into_openai_tuple(self) -> (http::StatusCode, axum::Json<openai::OpenAiError>) {
-        (self.status_code(), axum::Json(self.to_openai()))
+    fn into_openai_tuple(self) -> (http::StatusCode, InfallibleJson<openai::OpenAiError>) {
+        (self.status_code(), InfallibleJson(self.to_openai()))
     }
     #[inline]
-    fn into_anthropic_tuple(self) -> (http::StatusCode, axum::Json<anthropic::AnthropicError>) {
-        (self.status_code(), axum::Json(self.to_anthropic()))
+    fn into_anthropic_tuple(
+        self,
+    ) -> (http::StatusCode, InfallibleJson<anthropic::AnthropicError>) {
+        (self.status_code(), InfallibleJson(self.to_anthropic()))
     }
 }

@@ -24,10 +24,10 @@ pub use hash_set::HashSet;
 pub mod tree_index;
 pub use tree_index::TreeIndex;
 
-mod async_helper;
 mod data_block;
 mod exit_guard;
 mod hash_table;
+mod utils;
 
 #[cfg(feature = "serde")]
 mod serde;

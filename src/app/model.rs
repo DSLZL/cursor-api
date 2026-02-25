@@ -26,9 +26,12 @@ mod vision_ability;
 use super::constant::{
     AUTHORIZATION_BEARER_PREFIX, EMPTY_STRING, STATUS_FAILURE, STATUS_PENDING, STATUS_SUCCESS,
 };
-use crate::common::model::{
-    ApiStatus,
-    userinfo::{Session, StripeProfile, UsageProfile, UserProfile},
+use crate::{
+    app::route::InfallibleSerialize,
+    common::model::{
+        ApiStatus,
+        userinfo::{Session, StripeProfile, UsageProfile, UserProfile},
+    },
 };
 pub use alias::Alias;
 use alloc::borrow::Cow;
@@ -714,6 +717,8 @@ impl Serialize for TokensGetResponse {
     }
 }
 
+unsafe impl InfallibleSerialize for TokensGetResponse {}
+
 pub struct TokensAddResponse {
     pub tokens_count: usize,
     pub message: &'static str,
@@ -730,6 +735,8 @@ impl Serialize for TokensAddResponse {
         state.end()
     }
 }
+
+unsafe impl InfallibleSerialize for TokensAddResponse {}
 
 // TokensUpdateRequest 结构体
 pub type TokensUpdateRequest = Vec<(String, TokenInfo)>;
@@ -801,11 +808,15 @@ pub struct TokensDeleteResponse {
     pub failed_tokens: Option<Vec<String>>,
 }
 
+unsafe impl InfallibleSerialize for TokensDeleteResponse {}
+
 #[derive(Serialize)]
 pub struct CommonResponse {
     pub status: ApiStatus,
     pub message: Cow<'static, str>,
 }
+
+unsafe impl InfallibleSerialize for CommonResponse {}
 
 #[derive(Deserialize)]
 pub struct TokensStatusSetRequest {

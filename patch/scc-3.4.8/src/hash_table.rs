@@ -16,10 +16,10 @@ use bucket_array::BucketArray;
 use loom::sync::atomic::AtomicUsize;
 use sdd::{AtomicShared, Ptr, Shared, Tag};
 
-use super::async_helper::AsyncGuard;
 use super::data_block::DataBlock;
 use super::exit_guard::ExitGuard;
 use super::hash_table::bucket::Bucket;
+use super::utils::{AsyncGuard, unwrap_unchecked};
 use super::{Equivalent, Guard};
 
 /// `HashTable` defines common functions for hash table implementations.
@@ -900,11 +900,8 @@ where
         let (target_index, end_target_index) =
             from_index_to_range(old_array.len(), current_array.len(), old_index);
         for i in target_index..end_target_index {
-            let writer = unsafe {
-                Writer::lock_async(current_array.bucket(i), async_guard)
-                    .await
-                    .unwrap_unchecked()
-            };
+            let writer =
+                unwrap_unchecked(Writer::lock_async(current_array.bucket(i), async_guard).await);
             forget(writer);
         }
 
@@ -964,7 +961,7 @@ where
                 };
                 writer
             } else {
-                unsafe { Writer::lock_sync(current_array.bucket(i)).unwrap_unchecked() }
+                unwrap_unchecked(Writer::lock_sync(current_array.bucket(i)))
             };
             forget(writer);
         }

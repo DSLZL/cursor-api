@@ -8,7 +8,7 @@ use crate::{
 };
 use alloc::borrow::Cow;
 use byte_str::ByteStr;
-use serde::{Deserialize, Serialize, Serializer, ser::SerializeStruct as _};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, ser::SerializeStruct as _};
 
 #[derive(Deserialize)]
 pub struct ChatCompletionCreateParams {
@@ -43,24 +43,14 @@ pub enum ChatCompletionMessageParam {
     User { content: ChatCompletionContent },
     #[serde(rename = "assistant")]
     Assistant {
+        #[serde(default)]
         content: ChatCompletionContentText,
-        #[serde(with = "option_as_array", default, skip_serializing_if = "Option::is_none")]
-        tool_calls: Option<Box<ChatCompletionMessageToolCall>>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tool_calls: Vec<ChatCompletionMessageToolCall>,
     },
     #[serde(rename = "tool")]
     Tool { content: ChatCompletionContentText, tool_call_id: ByteStr },
 }
-
-// impl ChatCompletionMessageParam {
-//     #[inline]
-//     pub fn role(&self) -> Role {
-//         match self {
-//             Self::System { .. } => Role::System,
-//             Self::User { .. } | Self::Tool { .. } => Role::User,
-//             Self::Assistant { .. } => Role::Assistant,
-//         }
-//     }
-// }
 
 #[derive(Serialize, Deserialize)]
 #[serde(untagged)]
@@ -80,39 +70,56 @@ pub enum ChatCompletionContentPart {
 #[serde(untagged)]
 pub enum ChatCompletionContentText {
     String(String),
-    Array(Vec<ChatCompletionContentPartText>),
+    #[serde(with = "chat_completion_content_part_text")]
+    Array(Vec<String>),
+}
+
+impl const Default for ChatCompletionContentText {
+    #[inline]
+    fn default() -> Self { Self::String(String::new()) }
 }
 
 impl ChatCompletionContentText {
     pub fn text(self) -> String {
         match self {
             Self::String(string) => string,
-            Self::Array(contents) => contents
-                .into_iter()
-                .map(ChatCompletionContentPartText::text)
-                .collect::<Vec<_>>()
-                .join("\n"),
+            Self::Array(contents) => contents.join("\n"),
         }
+    }
+}
+
+mod chat_completion_content_part_text {
+    use super::{ChatCompletionContentPartText, Deserialize, Deserializer, Serialize, Serializer};
+    pub(super) fn serialize<S>(_self: &Vec<String>, serializer: S) -> Result<S::Ok, S::Error>
+    where S: Serializer {
+        // SAFETY: ChatCompletionContentPartText and String have the same layout
+        let this: &Vec<ChatCompletionContentPartText> = unsafe { core::mem::transmute(_self) };
+        this.serialize(serializer)
+    }
+    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+    where D: Deserializer<'de> {
+        let value = Vec::<ChatCompletionContentPartText>::deserialize(deserializer)?;
+        // SAFETY: String and ChatCompletionContentPartText have the same layout
+        Ok(unsafe { core::mem::transmute(value) })
     }
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[repr(transparent)]
 pub enum ChatCompletionContentPartText {
     Text { text: String },
-}
-
-impl ChatCompletionContentPartText {
-    pub fn text(self) -> String {
-        let Self::Text { text } = self;
-        text
-    }
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChatCompletionMessageToolCall {
-    Function { id: ByteStr, function: chat_completion_message_tool_call::Function },
+    Function {
+        id: ByteStr,
+        function: chat_completion_message_tool_call::Function,
+    },
+    #[serde(skip)]
+    Taked,
 }
 
 pub mod chat_completion_message_tool_call {

@@ -1,6 +1,8 @@
+use crate::{
+    app::route::InfallibleJson,
+    common::model::{ApiStatus, GenericError},
+};
 use alloc::borrow::Cow;
-
-use crate::common::model::{ApiStatus, GenericError};
 
 const SIZE_LIMIT_MSG: &str = "Message exceeds 4 MiB size limit";
 
@@ -22,8 +24,10 @@ impl ExceedSizeLimit {
     }
 
     #[inline]
-    pub const fn into_response_tuple(self) -> (http::StatusCode, axum::Json<GenericError>) {
-        (http::StatusCode::PAYLOAD_TOO_LARGE, axum::Json(self.into_generic()))
+    pub const fn into_response_tuple(
+        self,
+    ) -> (http::StatusCode, InfallibleJson<GenericError>) {
+        (http::StatusCode::PAYLOAD_TOO_LARGE, InfallibleJson(self.into_generic()))
     }
 }
 

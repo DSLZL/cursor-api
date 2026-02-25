@@ -59,10 +59,11 @@ crate::define_typed_constants! {
 impl ::serde::Serialize for TokenPayload {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where S: ::serde::Serializer {
-        use ::serde::ser::SerializeStruct as _;
+        use serde::ser::SerializeStruct as _;
 
         let exist_workos_session_id = !self.workos_session_id.is_empty();
-        let mut state = serializer.serialize_struct(STRUCT_NAME, FIELD_COUNT + exist_workos_session_id as usize)?;
+        let count = FIELD_COUNT + exist_workos_session_id as usize;
+        let mut state = serializer.serialize_struct(STRUCT_NAME, count)?;
         state.serialize_field(FIELD_SUB, &self.sub)?;
         state.serialize_field(FIELD_TIME, &self.time)?;
         state.serialize_field(FIELD_RANDOMNESS, &self.randomness)?;
@@ -81,7 +82,7 @@ impl ::serde::Serialize for TokenPayload {
 impl<'de> ::serde::Deserialize<'de> for TokenPayload {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where D: ::serde::Deserializer<'de> {
-        use ::serde::de::{self, MapAccess, Visitor};
+        use serde::de::{self, MapAccess, Visitor};
 
         #[derive(Clone, Copy)]
         enum Field {
@@ -254,8 +255,7 @@ impl<'de> ::serde::Deserialize<'de> for TokenPayload {
                     randomness.ok_or_else(|| de::Error::missing_field(FIELD_RANDOMNESS))?;
                 let exp = exp.ok_or_else(|| de::Error::missing_field(FIELD_EXP))?;
                 let is_session = is_session.ok_or_else(|| de::Error::missing_field(FIELD_TYPE))?;
-                let workos_session_id = workos_session_id
-                    .unwrap_or_else(SessionId::empty);
+                let workos_session_id = workos_session_id.unwrap_or_else(SessionId::empty);
 
                 // 检查必须存在的常量字段
                 if !iss_seen {

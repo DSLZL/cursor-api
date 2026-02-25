@@ -3,10 +3,14 @@ mod cpp;
 mod cursor;
 
 use crate::{
-    common::model::GenericError,
-    core::model::{anthropic::AnthropicError, openai::OpenAiError},
+    app::route::InfallibleJson,
+    common::model::{ApiStatus, GenericError},
+    core::model::{
+        anthropic::{AnthropicError, AnthropicErrorInner},
+        openai::{OpenAiError, OpenAiErrorInner},
+    },
 };
-use axum::Json;
+use alloc::borrow::Cow;
 pub use canonical::CanonicalError;
 pub use cpp::CppError;
 pub use cursor::CursorError;
@@ -248,7 +252,61 @@ impl ::core::fmt::Display for StreamError {
 }
 
 pub trait ErrorExt: Sized {
-    fn into_generic_tuple(self) -> (StatusCode, Json<GenericError>);
-    fn into_openai_tuple(self) -> (StatusCode, Json<OpenAiError>);
-    fn into_anthropic_tuple(self) -> (StatusCode, Json<AnthropicError>);
+    fn into_generic_tuple(self) -> (StatusCode, InfallibleJson<GenericError>);
+    fn into_openai_tuple(self) -> (StatusCode, InfallibleJson<OpenAiError>);
+    fn into_anthropic_tuple(self) -> (StatusCode, InfallibleJson<AnthropicError>);
+}
+
+pub trait ErrorTriple: Sized {
+    fn triple(&self) -> (StatusCode, &'static str, Cow<'static, str>);
+}
+
+impl<T: ErrorTriple> ErrorExt for T {
+    #[inline]
+    fn into_generic_tuple(self) -> (StatusCode, InfallibleJson<GenericError>) {
+        let (status, error_type, message) = self.triple();
+        (
+            status,
+            InfallibleJson(GenericError {
+                status: ApiStatus::Error,
+                code: Some(status),
+                error: Some(Cow::Borrowed(error_type)),
+                message: Some(message),
+            }),
+        )
+    }
+
+    #[inline]
+    fn into_openai_tuple(self) -> (StatusCode, InfallibleJson<OpenAiError>) {
+        let (status, error_type, message) = self.triple();
+        (
+            status,
+            InfallibleJson(
+                OpenAiErrorInner { code: Some(Cow::Borrowed(error_type)), message }.wrapped(),
+            ),
+        )
+    }
+
+    #[inline]
+    fn into_anthropic_tuple(self) -> (StatusCode, InfallibleJson<AnthropicError>) {
+        let (status, error_type, message) = self.triple();
+        (
+            status,
+            InfallibleJson(AnthropicErrorInner { r#type: error_type, message }.wrapped()),
+        )
+    }
+}
+
+impl ErrorTriple for axum::extract::rejection::FailedToBufferBody {
+    #[inline]
+    fn triple(&self) -> (StatusCode, &'static str, Cow<'static, str>) {
+        (self.status(), "failed_to_buffer_body", Cow::Owned(self.body_text()))
+    }
+}
+
+impl ErrorTriple for axum::extract::rejection::BytesRejection {
+    #[inline]
+    fn triple(&self) -> (StatusCode, &'static str, Cow<'static, str>) {
+        (self.status(), "bytes_rejection", Cow::Owned(self.body_text()))
+    }
 }

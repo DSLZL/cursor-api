@@ -262,7 +262,11 @@ pub(super) trait ToByteStr: Sized {
     fn to_byte_str(&self) -> ByteStr;
 }
 
-impl<T: ToString> ToByteStr for T {
+impl ToByteStr for uuid::Uuid {
     #[inline(always)]
-    fn to_byte_str(&self) -> ByteStr { self.to_string().into() }
+    fn to_byte_str(&self) -> ByteStr {
+        let mut buffer = [0; 36];
+        self.as_hyphenated().encode_lower(&mut buffer);
+        unsafe { ByteStr::from_utf8_unchecked(bytes::Bytes::copy_from_slice(&buffer)) }
+    }
 }

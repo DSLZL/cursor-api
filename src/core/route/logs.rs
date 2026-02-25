@@ -6,13 +6,13 @@ use crate::{
             AppState, DateTime, ExtToken, GetLogsParams, LogStatus, RequestLog, TokenKey,
             log_manager,
         },
+        route::{GenericJson, InfallibleJson, InfallibleSerialize},
     },
     common::model::{ApiStatus, userinfo::MembershipType},
     core::config::parse_dynamic_token,
 };
 use alloc::sync::Arc;
 use axum::{
-    Json,
     extract::State,
     http::{HeaderMap, StatusCode, header::AUTHORIZATION},
 };
@@ -67,8 +67,8 @@ pub struct LogsRequest {
 pub async fn handle_get_logs(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Json(request): Json<LogsRequest>,
-) -> Result<Json<LogsResponse>, StatusCode> {
+    GenericJson(request): GenericJson<LogsRequest>,
+) -> Result<InfallibleJson<LogsResponse>, StatusCode> {
     let auth_token = headers
         .get(AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
@@ -93,7 +93,7 @@ pub async fn handle_get_logs(
         match LogStatus::from_str_name(status) {
             Some(s) => Some(s),
             None => {
-                return Ok(Json(LogsResponse {
+                return Ok(InfallibleJson(LogsResponse {
                     status: ApiStatus::Success,
                     total: 0,
                     active: None,
@@ -111,7 +111,7 @@ pub async fn handle_get_logs(
         match MembershipType::from_str(membership_type) {
             Some(m) => Some(m),
             None => {
-                return Ok(Json(LogsResponse {
+                return Ok(InfallibleJson(LogsResponse {
                     status: ApiStatus::Success,
                     total: 0,
                     active: None,
@@ -169,7 +169,7 @@ pub async fn handle_get_logs(
 
     let (total, logs) = log_manager::get_logs(params).await;
 
-    Ok(Json(LogsResponse {
+    Ok(InfallibleJson(LogsResponse {
         status: ApiStatus::Success,
         total,
         active,
@@ -191,10 +191,12 @@ pub struct LogsResponse {
     pub timestamp: DateTime,
 }
 
+unsafe impl InfallibleSerialize for LogsResponse {}
+
 pub async fn handle_get_logs_tokens(
     headers: HeaderMap,
-    Json(keys): Json<HashSet<String>>,
-) -> Result<Json<LogsTokensResponse>, StatusCode> {
+    GenericJson(keys): GenericJson<HashSet<String>>,
+) -> Result<InfallibleJson<LogsTokensResponse>, StatusCode> {
     // 获取认证头
     let auth_token = headers
         .get(AUTHORIZATION)
@@ -209,7 +211,7 @@ pub async fn handle_get_logs_tokens(
             .collect();
         let len = keys.len();
         let map = log_manager::get_tokens(keys).await;
-        Ok(Json(LogsTokensResponse {
+        Ok(InfallibleJson(LogsTokensResponse {
             status: ApiStatus::Success,
             tokens: map,
             total: len as u64,
@@ -233,7 +235,7 @@ pub async fn handle_get_logs_tokens(
             match TokenKey::from_string(&key_str) {
                 Some(key) if key == token_key => {
                     let result = log_manager::get_token(token_key).await;
-                    Ok(Json(LogsTokensResponse {
+                    Ok(InfallibleJson(LogsTokensResponse {
                         status: ApiStatus::Success,
                         tokens: HashMap::from_iter([(key_str, result)]),
                         total: 1,
@@ -256,3 +258,5 @@ pub struct LogsTokensResponse {
     pub total: u64,
     pub timestamp: DateTime,
 }
+
+unsafe impl InfallibleSerialize for LogsTokensResponse {}

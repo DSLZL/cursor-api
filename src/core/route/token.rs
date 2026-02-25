@@ -7,6 +7,7 @@ use crate::{
             GetConfigVersionResponse, Token, UnextTokenRef, UsageCheckModelType,
             dynamic_key::get_hash, proxy_pool::get_client_or_general,
         },
+        route::{GenericJson, InfallibleJson, InfallibleSerialize},
     },
     common::{
         model::userinfo::{Session, StripeProfile, UsageProfile, UserProfile},
@@ -14,10 +15,7 @@ use crate::{
     },
     core::config::{ConfiguredKey, configured_key},
 };
-use axum::{
-    Json,
-    http::{HeaderMap, StatusCode, header::AUTHORIZATION},
-};
+use axum::http::{HeaderMap, StatusCode, header::AUTHORIZATION};
 use interned::ArcStr;
 
 // 常量定义
@@ -38,10 +36,13 @@ fn verify_auth_token(headers: &HeaderMap) -> bool {
 
 pub async fn handle_build_key(
     headers: HeaderMap,
-    Json(request): Json<BuildKeyRequest>,
-) -> (StatusCode, Json<BuildKeyResponse>) {
+    GenericJson(request): GenericJson<BuildKeyRequest>,
+) -> (StatusCode, InfallibleJson<BuildKeyResponse>) {
     if verify_auth_token(&headers) {
-        return (StatusCode::UNAUTHORIZED, Json(BuildKeyResponse::Error(ERROR_UNAUTHORIZED)));
+        return (
+            StatusCode::UNAUTHORIZED,
+            InfallibleJson(BuildKeyResponse::Error(ERROR_UNAUTHORIZED)),
+        );
     }
 
     let token_key = request.token.key();
@@ -86,18 +87,22 @@ pub async fn handle_build_key(
 
     (
         StatusCode::OK,
-        Json(BuildKeyResponse::Keys([key, token_key.to_string(), token_key.to_string2()])),
+        InfallibleJson(BuildKeyResponse::Keys([
+            key,
+            token_key.to_string(),
+            token_key.to_string2(),
+        ])),
     )
 }
 
 pub async fn handle_get_config_version(
     headers: HeaderMap,
-    Json(request): Json<GetConfigVersionRequest>,
-) -> (StatusCode, Json<GetConfigVersionResponse>) {
+    GenericJson(request): GenericJson<GetConfigVersionRequest>,
+) -> (StatusCode, InfallibleJson<GetConfigVersionResponse>) {
     if verify_auth_token(&headers) {
         return (
             StatusCode::UNAUTHORIZED,
-            Json(GetConfigVersionResponse::Error(ERROR_UNAUTHORIZED)),
+            InfallibleJson(GetConfigVersionResponse::Error(ERROR_UNAUTHORIZED)),
         );
     }
 
@@ -117,8 +122,8 @@ pub async fn handle_get_config_version(
     };
 
     match crate::common::utils::get_server_config(token, false).await {
-        Some(cv) => (StatusCode::OK, Json(GetConfigVersionResponse::ConfigVersion(cv))),
-        None => (StatusCode::FORBIDDEN, Json(GetConfigVersionResponse::Error("No data"))),
+        Some(cv) => (StatusCode::OK, InfallibleJson(GetConfigVersionResponse::ConfigVersion(cv))),
+        None => (StatusCode::FORBIDDEN, InfallibleJson(GetConfigVersionResponse::Error("No data"))),
     }
 }
 
@@ -139,28 +144,30 @@ pub enum GetTokenProfileResponse {
     Error(&'static str),
 }
 
+unsafe impl InfallibleSerialize for GetTokenProfileResponse {}
+
 pub async fn handle_get_token_profile(
     headers: HeaderMap,
-    Json(request): Json<GetTokenProfileRequest>,
-) -> (StatusCode, Json<GetTokenProfileResponse>) {
+    GenericJson(request): GenericJson<GetTokenProfileRequest>,
+) -> (StatusCode, InfallibleJson<GetTokenProfileResponse>) {
     if verify_auth_token(&headers) {
         return (
             StatusCode::UNAUTHORIZED,
-            Json(GetTokenProfileResponse::Error(ERROR_UNAUTHORIZED)),
+            InfallibleJson(GetTokenProfileResponse::Error(ERROR_UNAUTHORIZED)),
         );
     }
 
     if request.session_token.is_web() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(GetTokenProfileResponse::Error(ERROR_INVALID_SESSION_TOKEN)),
+            InfallibleJson(GetTokenProfileResponse::Error(ERROR_INVALID_SESSION_TOKEN)),
         );
     }
 
     if request.web_token.is_session() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(GetTokenProfileResponse::Error(ERROR_INVALID_WEB_TOKEN)),
+            InfallibleJson(GetTokenProfileResponse::Error(ERROR_INVALID_WEB_TOKEN)),
         );
     }
 
@@ -171,7 +178,7 @@ pub async fn handle_get_token_profile(
 
     (
         StatusCode::OK,
-        Json(GetTokenProfileResponse::TokenProfile(
+        InfallibleJson(GetTokenProfileResponse::TokenProfile(
             crate::common::utils::get_token_profile(
                 get_client_or_general(request.proxy_name.as_deref()),
                 unext,

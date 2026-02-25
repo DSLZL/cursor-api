@@ -1,108 +1,111 @@
-// use ::bytes::{Buf as _, BytesMut};
-
 use super::{
     decompress_gzip,
-    types::{DecodedMessage, DecoderError, ProtobufMessage},
+    types::{DecoderError, ProtobufMessage},
 };
+use crate::core::error::CursorError;
 use alloc::borrow::Cow;
+use http::{
+    HeaderMap,
+    header::{CONTENT_ENCODING, CONTENT_TYPE},
+};
 
-// #[derive(Clone)]
-// pub struct DirectDecoder<T: ProtobufMessage> {
-//     buf: BytesMut,
-//     _phantom: std::marker::PhantomData<T>,
-// }
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct UnaryDecoder {
+    compression: Compression,
+    content_type: UnaryContentType,
+}
 
-// impl<T: ProtobufMessage> DirectDecoder<T> {
-//     pub fn new() -> Self {
-//         Self {
-//             buf: BytesMut::new(),
-//             _phantom: std::marker::PhantomData,
-//         }
-//     }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Compression {
+    Identity,
+    Gzip,
+}
 
-//     pub fn decode(&mut self, data: &[u8]) -> Result<Option<DecodedMessage<T>>, DecoderError> {
-//         self.buf.extend_from_slice(data);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnaryContentType {
+    Protobuf,
+    Json,
+}
 
-//         // 首先尝试按带头部的格式处理
-//         if self.buf.len() >= 5 && self.buf[0] <= 1 {
-//             // 检查头部
-//             let is_compressed = data[0] == 1;
-//             let msg_len = u32::from_be_bytes([data[1], data[2], data[3], data[4]]) as usize;
+impl UnaryDecoder {
+    /// Parse Connect unary response metadata from headers.
+    pub(crate) fn new(headers: &HeaderMap) -> Result<Self, DecoderError> {
+        Ok(Self {
+            compression: parse_compression(headers)?,
+            content_type: parse_content_type(headers)?,
+        })
+    }
 
-//             // 如果数据完整，按带头部格式处理
-//             if self.buf.len() == 5 + msg_len {
-//                 self.buf.advance(5);
+    /// Decode a Connect unary response payload.
+    pub(crate) fn decode<T: ProtobufMessage>(
+        &self,
+        data: &[u8],
+    ) -> Result<Result<T, CursorError>, DecoderError> {
+        let payload = match self.compression {
+            Compression::Identity => Cow::Borrowed(data),
+            Compression::Gzip => {
+                let decompressed =
+                    decompress_gzip(data).ok_or(DecoderError::GzipDecompressionFailed)?;
+                Cow::Owned(decompressed)
+            }
+        };
 
-//                 if is_compressed {
-//                     match decompress_gzip(&self.buf) {
-//                         Some(data) => {
-//                             self.buf = data.as_slice().into();
-//                         }
-//                         None => return Err(DecoderError::Internal("decompress error")),
-//                     }
-//                 };
-
-//                 if let Ok(msg) = T::decode(&self.buf[..]) {
-//                     return Ok(Some(DecodedMessage::Protobuf(msg)));
-//                 } else if let Ok(text) = String::from_utf8(self.buf.to_vec()) {
-//                     return Ok(Some(DecodedMessage::Text(text)));
-//                 }
-//             }
-//         }
-
-//         // 如果不是带头部的格式，尝试直接处理数据
-//         // 首先尝试解压（可能是压缩的直接数据）
-//         if let Some(decompressed) = decompress_gzip(&self.buf) {
-//             self.buf = decompressed.as_slice().into();
-//         };
-
-//         // 尝试解析
-//         if let Ok(msg) = T::decode(&self.buf[..]) {
-//             self.buf.clear();
-//             Ok(Some(DecodedMessage::Protobuf(msg)))
-//         } else if let Ok(text) = String::from_utf8(self.buf.to_vec()) {
-//             self.buf.clear();
-//             Ok(Some(DecodedMessage::Text(text)))
-//         } else {
-//             Ok(None)
-//         }
-//     }
-// }
-
-pub fn decode<T: ProtobufMessage>(data: &[u8]) -> Result<DecodedMessage<T>, DecoderError> {
-    // 首先尝试按带头部的格式处理
-    if data.len() >= 5 && data[0] <= 1 {
-        // 检查头部
-        let is_compressed = data[0] == 1;
-        let msg_len = u32::from_be_bytes([data[1], data[2], data[3], data[4]]) as usize;
-
-        // 如果数据完整，按带头部格式处理
-        if data.len() == 5 + msg_len {
-            let payload = &data[5..];
-
-            let decompressed = if is_compressed {
-                match decompress_gzip(payload) {
-                    Some(data) => Cow::Owned(data),
-                    None => return Err(DecoderError::Internal("decompress error")),
-                }
-            } else {
-                Cow::Borrowed(payload)
-            };
-
-            if let Ok(msg) = T::decode(&*decompressed) {
-                return Ok(DecodedMessage::Protobuf(msg));
-            } else if let Some(text) = super::utils::string_from_utf8(decompressed) {
-                return Ok(DecodedMessage::Text(text));
+        match self.content_type {
+            UnaryContentType::Json => {
+                let cursor_err = serde_json::from_slice::<CursorError>(payload.as_ref())
+                    .map_err(|source| DecoderError::CursorErrorJsonDecodeFailed { source })?;
+                Ok(Err(cursor_err))
+            }
+            UnaryContentType::Protobuf => {
+                let msg = T::decode(payload.as_ref())
+                    .map_err(|source| DecoderError::ProtobufDecodeFailed { source })?;
+                Ok(Ok(msg))
             }
         }
     }
+}
 
-    // 尝试解析
-    if let Ok(msg) = T::decode(data) {
-        Ok(DecodedMessage::Protobuf(msg))
-    } else if let Some(text) = super::utils::string_from_utf8(data) {
-        Ok(DecodedMessage::Text(text))
+/// Decode a Connect unary response using response headers + body.
+pub(crate) fn decode<T: ProtobufMessage>(
+    headers: &HeaderMap,
+    data: &[u8],
+) -> Result<Result<T, CursorError>, DecoderError> {
+    UnaryDecoder::new(headers)?.decode::<T>(data)
+}
+
+fn parse_compression(headers: &HeaderMap) -> Result<Compression, DecoderError> {
+    let Some(value) = headers.get(CONTENT_ENCODING) else {
+        return Ok(Compression::Identity);
+    };
+
+    let raw = value.to_str().map_err(|_| DecoderError::InvalidContentEncoding)?;
+    let mut parts = raw.split(',').map(|s| s.trim()).filter(|s| !s.is_empty());
+
+    let first = parts.next().unwrap_or("");
+    if parts.next().is_some() {
+        return Err(DecoderError::UnsupportedContentEncoding { actual: raw.into() });
+    }
+
+    if first.eq_ignore_ascii_case("gzip") {
+        Ok(Compression::Gzip)
+    } else if first.is_empty() || first.eq_ignore_ascii_case("identity") {
+        Ok(Compression::Identity)
     } else {
-        Err(DecoderError::Internal("decode error"))
+        Err(DecoderError::UnsupportedContentEncoding { actual: raw.into() })
+    }
+}
+
+fn parse_content_type(headers: &HeaderMap) -> Result<UnaryContentType, DecoderError> {
+    let value = headers.get(CONTENT_TYPE).ok_or(DecoderError::MissingContentType)?;
+    let raw = value.to_str().map_err(|_| DecoderError::InvalidContentType)?;
+
+    let mime = raw.split(';').next().unwrap_or("").trim();
+
+    if mime.eq_ignore_ascii_case("application/json") {
+        Ok(UnaryContentType::Json)
+    } else if mime.eq_ignore_ascii_case("application/proto") {
+        Ok(UnaryContentType::Protobuf)
+    } else {
+        Err(DecoderError::UnsupportedContentType { actual: raw.into() })
     }
 }

@@ -4,7 +4,7 @@ mod resolver;
 
 // use crate::app::constant::TOOLU01_PREFIX;
 use super::constant::Models;
-use crate::common::model::raw_json::RawJson;
+use crate::{app::route::InfallibleSerialize, common::model::raw_json::RawJson};
 pub(crate) use resolver::{ExtModel, init_resolver};
 use serde::{Serialize, ser::SerializeStruct as _};
 
@@ -132,6 +132,8 @@ impl Serialize for RawModelsResponse {
         state.end()
     }
 }
+
+unsafe impl InfallibleSerialize for RawModelsResponse {}
 
 #[derive(Clone, Copy)]
 #[repr(transparent)]

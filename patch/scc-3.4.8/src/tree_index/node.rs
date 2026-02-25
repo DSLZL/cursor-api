@@ -8,7 +8,7 @@ use super::internal_node::InternalNode;
 use super::internal_node::Locker as InternalNodeLocker;
 use super::leaf::{InsertResult, Iter, Leaf, RemoveResult, RevIter};
 use super::leaf_node::LeafNode;
-use crate::async_helper::LockPager;
+use crate::utils::{LockPager, deref_unchecked, drop_in_place};
 use crate::{Comparable, Guard};
 
 /// [`Node`] is either [`Self::Internal`] or [`Self::Leaf`].
@@ -32,16 +32,19 @@ impl<K, V> Node<K, V> {
         Self::Internal(InternalNode::new_frozen())
     }
 
-    /// Creates a new [`LeafNode`].
-    #[inline]
-    pub(super) fn new_leaf_node() -> Self {
-        Self::Leaf(LeafNode::new())
-    }
-
     /// Creates a new [`LeafNode`] in a frozen state.
     #[inline]
     pub(super) fn new_leaf_node_frozen() -> Self {
         Self::Leaf(LeafNode::new_frozen())
+    }
+
+    /// Clears the node.
+    #[inline]
+    pub(super) fn clear(&self, guard: &Guard) {
+        match self {
+            Self::Internal(internal_node) => internal_node.clear(guard),
+            Self::Leaf(leaf_node) => leaf_node.clear(guard),
+        }
     }
 
     /// Returns the depth of the node.
@@ -68,6 +71,12 @@ where
     K: 'static + Clone + Ord,
     V: 'static,
 {
+    /// Creates a new [`LeafNode`].
+    #[inline]
+    pub(super) fn new_leaf_node() -> Self {
+        Self::Leaf(LeafNode::new())
+    }
+
     /// Searches for an entry containing the specified key.
     #[inline]
     pub(super) fn search_entry<'g, Q>(&self, key: &Q, guard: &'g Guard) -> Option<(&'g K, &'g V)>
@@ -245,8 +254,7 @@ where
             if let Err((Some(new_root), _)) =
                 root.compare_exchange(root_ptr, (new_root, Tag::None), AcqRel, Acquire, guard)
             {
-                let dropped = unsafe { new_root.drop_in_place() };
-                debug_assert!(dropped);
+                drop_in_place(new_root);
             }
         }
     }
@@ -264,7 +272,7 @@ where
         guard: &Guard,
     ) -> bool {
         let mut root_ptr = root.load(Acquire, guard);
-        while let Some(root_ref) = root_ptr.as_ref() {
+        while let Some(root_ref) = deref_unchecked(root_ptr) {
             if root_ref.is_retired() {
                 if let Err((_, new_root_ptr)) =
                     root.compare_exchange(root_ptr, (None, Tag::None), AcqRel, Acquire, guard)
